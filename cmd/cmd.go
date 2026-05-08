@@ -343,7 +343,7 @@ Examples:
   aiscan agent --llm-provider deepseek --llm-model deepseek-chat -p "enumerate services" -i 10.0.0.0/24
   aiscan agent --llm-provider ollama --llm-model llama3 --llm-base-url http://localhost:11434/v1 -p "check this host" -i http://target.com
   aiscan scan -i 127.0.0.1 --mode quick --verify=high --llm-api-key KEY --llm-model gpt-4o
-  aiscan scan -i 192.168.1.0/24 --mode full --ports top1000
+  aiscan scan -i 192.168.1.0/24 --mode full
   aiscan acp serve
   aiscan loop -p "localhost web scanner" -s aiscan --space case-1`
 	return parser

@@ -7,25 +7,28 @@ import (
 	zombiepkg "github.com/chainreactors/zombie/pkg"
 )
 
-func deriveServiceResult(profile profile, result serviceResult, emit emitFunc) {
+func deriveServiceResult(profile profile, source string, result serviceResult, emit emitFunc) {
 	if result.Result == nil {
 		return
+	}
+	if source == "" {
+		source = capGogoPortscan
 	}
 
 	fingers := parsers.FrameworkNames(result.Result.Frameworks)
 	target := result.Result.GetTarget()
 	if webURL := gogoWebURL(result.Result); webURL != "" {
 		target = webURL
-		emit(targetEvent(capCoreService, "", newWebTarget("", webURL, "")))
+		emit(targetEvent(source, "", newWebTarget("", webURL, "")))
 	}
 	if len(fingers) > 0 {
-		emit(findingEvent(capCoreService, fingerprintFinding{Target: target, Fingers: fingers}))
+		emit(findingEvent(source, fingerprintFinding{Target: target, Fingers: fingers}))
 	}
 	if len(fingers) > 0 || profile.AllowBroadPOC {
-		emit(targetEvent(capCoreService, "", newPOCTarget("", target, fingers)))
+		emit(targetEvent(source, "", newPOCTarget("", target, fingers)))
 	}
 	if zTarget, ok := zombieTargetFromGogo(result.Result); ok {
-		emit(targetEvent(capCoreService, "", newWeakpassTarget("", zTarget)))
+		emit(targetEvent(source, "", newWeakpassTarget("", zTarget)))
 	}
 }
 

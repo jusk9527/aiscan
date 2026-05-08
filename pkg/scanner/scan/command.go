@@ -27,7 +27,7 @@ type flags struct {
 	Report          bool     `long:"report" description:"Output a concise final markdown report"`
 	OutputFile      string   `short:"f" long:"file" description:"Write output to file without ANSI colors"`
 	NoColor         bool     `long:"no-color" description:"Disable ANSI colors in terminal output"`
-	Ports           string   `long:"ports" description:"Ports for gogo scanning" default:"all"`
+	Ports           string   `long:"ports" description:"Ports for gogo scanning; defaults to all in quick and - in full"`
 	Port            string   `long:"port" description:"Ports for discovery scanning; overrides --ports when set"`
 	Threads         int      `long:"threads" description:"Gogo scan threads" default:"500"`
 	Timeout         int      `long:"timeout" description:"Per-probe timeout in seconds" default:"5"`
@@ -42,6 +42,7 @@ type flags struct {
 	Users           []string `long:"user" description:"Weakpass usernames. Can specify multiple."`
 	Passwords       []string `long:"pwd" description:"Weakpass passwords. Can specify multiple."`
 	MaxNeutronPerFP int      `long:"max-neutron-per-finger" description:"Maximum neutron templates per fingerprint" default:"20"`
+	BroadPOC        bool     `long:"broad-poc" description:"Run neutron POC checks even when no fingerprint matched"`
 	Verify          string   `long:"verify" description:"LLM verification mode: off, low, medium, high, critical" default:"off"`
 	VerifyTurns     int      `long:"verify-turns" description:"Maximum agent turns per verification" default:"3"`
 	VerifyTimeout   int      `long:"verify-timeout" description:"Timeout in seconds per verification" default:"120"`
@@ -76,7 +77,7 @@ Options:
       --report      Output a concise final markdown report
   -f, --file        Write output to file without ANSI colors
       --no-color    Disable ANSI colors in terminal output
-      --ports       Ports for gogo scanning (default: all)
+      --ports       Ports for gogo scanning (default: all in quick, - in full)
       --port        Ports for discovery scanning; overrides --ports when set
       --threads     Gogo scan threads (default: 500)
       --timeout     Timeout in seconds (default: 5)
@@ -91,12 +92,13 @@ Options:
       --user        Weakpass username. Can specify multiple.
       --pwd         Weakpass password. Can specify multiple.
       --max-neutron-per-finger  Maximum neutron templates per fingerprint (default: 20)
+      --broad-poc   Run neutron POC checks even when no fingerprint matched
       --verify      LLM verification mode: off, low, medium, high, critical (default: off)
       --verify-turns    Maximum agent turns per verification (default: 3)
       --verify-timeout  Timeout seconds per verification (default: 120)
 Profiles:
-  quick: discovery, service identification, web probing, web fingerprinting, spray common-file discovery, shallow crawl, weakpass checks, fingerprint-based POC
-  full: quick plus spray bak/fuzzuli/active/recon plugins, host collision, deeper crawl, broader POC checks
+  quick: gogo -p all -v, spray check/finger/common/crawl/bak/active with recon, weakpass, fingerprint-based POC
+  full: quick plus gogo -p - and spray_brute default dictionary
 Flow:
   input targets -> capability queues -> emitted events -> downstream capabilities
 Examples:
@@ -109,7 +111,7 @@ Examples:
   scan -i 127.0.0.1 --mode quick --report
   scan -i 127.0.0.1 --user admin --pwd admin123
   scan -i http://target.com --dict paths.txt --rule rules.txt
-  scan -l targets.txt --mode full --ports top1000 --zombie-top 5`
+  scan -l targets.txt --mode full --zombie-top 5`
 }
 
 func (c *Command) Execute(ctx context.Context, args []string) (string, error) {
@@ -134,6 +136,9 @@ func (c *Command) execute(ctx context.Context, args []string, stream io.Writer) 
 	profile, err := profileForMode(flags.Mode)
 	if err != nil {
 		return "", fmt.Errorf("scan: %w", err)
+	}
+	if flags.BroadPOC {
+		profile.AllowBroadPOC = true
 	}
 	if verificationEnabled(flags.Verify) {
 		if _, err := parsePriority(flags.Verify); err != nil {
@@ -164,9 +169,8 @@ func (c *Command) execute(ctx context.Context, args []string, stream io.Writer) 
 		return "", fmt.Errorf("scan: no valid inputs")
 	}
 
-	state := newPipelineState()
-	capabilities := c.buildCapabilities(flags, options, profile, state)
-	pipeline := newPipeline(ctx, state, capabilities, projector, flags.Debug)
+	capabilities := c.buildCapabilities(flags, options, profile)
+	pipeline := newPipeline(ctx, capabilities, projector, flags.Debug)
 	pipeline.Run(seeds)
 	projector.Finish()
 

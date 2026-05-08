@@ -53,6 +53,8 @@ func providerConfig(option *Option) provider.ProviderConfig {
 	cfg := defaultProviderConfig()
 	if option.Provider != "" {
 		cfg.Provider = option.Provider
+	} else if inferred := inferProviderFromBaseURL(option.BaseURL); inferred != "" {
+		cfg.Provider = inferred
 	}
 	if baseURL := resolvedBaseURL(option); baseURL != "" {
 		cfg.BaseURL = baseURL
@@ -80,6 +82,24 @@ func applyResolvedProviderOptions(option *Option, cfg provider.ProviderConfig) {
 
 func resolvedBaseURL(option *Option) string {
 	return option.BaseURL
+}
+
+func inferProviderFromBaseURL(baseURL string) string {
+	baseURL = strings.ToLower(strings.TrimSpace(baseURL))
+	switch {
+	case strings.Contains(baseURL, "deepseek.com"):
+		return "deepseek"
+	case strings.Contains(baseURL, "openrouter.ai"):
+		return "openrouter"
+	case strings.Contains(baseURL, "groq.com"):
+		return "groq"
+	case strings.Contains(baseURL, "moonshot.cn"):
+		return "moonshot"
+	case strings.Contains(baseURL, "localhost:11434"), strings.Contains(baseURL, "127.0.0.1:11434"):
+		return "ollama"
+	default:
+		return ""
+	}
 }
 
 func resolvedModel(option *Option) string {

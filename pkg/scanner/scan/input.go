@@ -2,80 +2,118 @@ package scan
 
 import (
 	"fmt"
+	"net"
 	"net/url"
 	"strings"
 
 	"github.com/chainreactors/utils"
 )
 
+const inputSource = "input"
+
 func buildSeedEvents(rawInputs []string, sink eventSink) []event {
-	var seeds []event
+	return targetEvents(inputSource, buildSeedTargets(rawInputs, sink))
+}
+
+func buildSeedTargets(rawInputs []string, sink eventSink) []target {
+	var targets []target
 	for _, raw := range rawInputs {
 		raw = strings.TrimSpace(raw)
 		if raw == "" {
 			continue
 		}
-		events := seedEventsFromInput(raw)
-		if len(events) == 0 {
+		parsed := seedTargetsFromInput(raw)
+		if len(parsed) == 0 {
 			if sink != nil {
 				sink.Observe(pipelineEvent{Action: pipelineEventAccept, Event: errorEventOf("", fmt.Sprintf("skip invalid input: %s", raw))})
 			}
 			continue
 		}
-		seeds = append(seeds, events...)
+		targets = append(targets, parsed...)
 	}
-	return seeds
+	return targets
 }
 
-func seedEventsFromInput(raw string) []event {
+func seedTargetsFromInput(raw string) []target {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return nil
 	}
 
+	if parsed, ok := parseInputURL(raw); ok {
+		return seedTargetsFromURL(raw, parsed)
+	}
 	if strings.Contains(raw, "://") {
-		parsed, err := url.Parse(raw)
-		if err != nil || parsed.Hostname() == "" {
-			return nil
-		}
-		var seeds []event
-		if utils.IsWebScheme(parsed.Scheme) {
-			seeds = append(seeds, targetEvent("input", raw, newWebTarget(raw, raw, "")))
-		}
-		if host := parsed.Hostname(); utils.IsDomainHost(host) {
-			seeds = append(seeds, targetEvent("input", raw, newHostCandidateTarget(raw, host)))
-		}
-		if target, ok := parseZombieTarget(raw, ""); ok {
-			seeds = append(seeds, targetEvent("input", raw, newWeakpassTarget(raw, target)))
-		}
-		return seeds
+		return nil
 	}
-
 	if strings.Contains(raw, "/") {
-		return []event{targetEvent("input", raw, newScanTarget(raw, raw, ""))}
+		if isCIDRInput(raw) {
+			return []target{newScanTarget(raw, raw, "")}
+		}
+		return nil
 	}
-
 	if host, port, ok := utils.SplitHostPort(raw); ok {
-		return seedEventsFromHostPort(host, port, raw)
+		return seedTargetsFromHostPort(host, port, raw)
 	}
-
-	seeds := []event{targetEvent("input", raw, newScanTarget(raw, raw, ""))}
-	if utils.IsDomainHost(raw) {
-		seeds = append(seeds, targetEvent("input", raw, newHostCandidateTarget(raw, raw)))
-	}
-	return seeds
+	return seedTargetsFromHost(raw, raw)
 }
 
-func seedEventsFromHostPort(host, port, raw string) []event {
-	seeds := []event{targetEvent("input", raw, newScanTarget(raw, host, port))}
-	if utils.IsDomainHost(host) {
-		seeds = append(seeds, targetEvent("input", raw, newHostCandidateTarget(raw, host)))
+func targetEvents(source string, targets []target) []event {
+	if len(targets) == 0 {
+		return nil
 	}
+	events := make([]event, 0, len(targets))
+	for _, target := range targets {
+		if target == nil {
+			continue
+		}
+		events = append(events, targetEvent(source, "", target))
+	}
+	return events
+}
+
+func parseInputURL(raw string) (*url.URL, bool) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" || !strings.Contains(raw, "://") {
+		return nil, false
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.Scheme == "" || parsed.Hostname() == "" {
+		return nil, false
+	}
+	return parsed, true
+}
+
+func isCIDRInput(raw string) bool {
+	_, _, err := net.ParseCIDR(strings.TrimSpace(raw))
+	return err == nil
+}
+
+func seedTargetsFromURL(raw string, parsed *url.URL) []target {
+	if parsed == nil {
+		return nil
+	}
+	var targets []target
+	if utils.IsWebScheme(parsed.Scheme) {
+		targets = append(targets, newWebTarget(raw, raw, ""))
+	}
+	if target, ok := zombieTargetFromParsedURL(parsed, ""); ok {
+		targets = append(targets, newWeakpassTarget(raw, target))
+	}
+	return targets
+}
+
+func seedTargetsFromHost(raw, host string) []target {
+	return []target{newScanTarget(raw, host, "")}
+}
+
+func seedTargetsFromHostPort(host, port, raw string) []target {
+	targets := []target{newScanTarget(raw, host, port)}
 	if utils.IsWebPort(port) {
-		seeds = append(seeds, targetEvent("input", raw, newWebTarget(raw, webURLFromHostPort(host, port), "")))
+		targets = append(targets, newWebTarget(raw, webURLFromHostPort(host, port), ""))
 	}
-	if target, ok := parseZombieTarget(raw, ""); ok {
-		seeds = append(seeds, targetEvent("input", raw, newWeakpassTarget(raw, target)))
+	if target, ok := zombieTargetFromHostPort(host, port, ""); ok {
+		targets = append(targets, newWeakpassTarget(raw, target))
 	}
-	return seeds
+	return targets
 }

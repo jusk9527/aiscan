@@ -22,6 +22,9 @@ type event struct {
 }
 
 func targetEvent(source, raw string, target target) event {
+	if raw == "" && target != nil {
+		raw = target.RawInput()
+	}
 	return event{Kind: eventTarget, Source: source, Raw: raw, Target: target}
 }
 

@@ -16,8 +16,13 @@ import (
 	"github.com/chainreactors/aiscan/pkg/provider"
 	"github.com/chainreactors/aiscan/pkg/scanner/engines"
 	"github.com/chainreactors/aiscan/pkg/telemetry"
+	"github.com/chainreactors/neutron/operators"
+	neutronhttp "github.com/chainreactors/neutron/protocols/http"
+	"github.com/chainreactors/neutron/templates"
 	"github.com/chainreactors/parsers"
 	sdkgogo "github.com/chainreactors/sdk/gogo"
+	sdkneutron "github.com/chainreactors/sdk/neutron"
+	"github.com/chainreactors/sdk/pkg/association"
 	"github.com/chainreactors/sdk/spray"
 	sdkzombie "github.com/chainreactors/sdk/zombie"
 )
@@ -38,12 +43,12 @@ func TestScanProfilesAssembleCapabilities(t *testing.T) {
 	if err != nil {
 		t.Fatalf("quick profile error = %v", err)
 	}
-	for _, name := range []string{capGogoPortscan, capSprayCheck, capSprayFinger, capSprayCommon, capSprayCrawl, capZombieWeakpass, capNeutronPOC} {
+	for _, name := range []string{capGogoPortscan, capSprayCheck, capSprayFinger, capCoreWeb, capSprayCommon, capSprayBackup, capSprayActive, capSprayCrawl, capZombieWeakpass, capNeutronPOC} {
 		if !quick.Enabled(name) {
 			t.Fatalf("quick profile missing %s", name)
 		}
 	}
-	for _, name := range []string{capSprayBackup, capSprayActive, capSprayRecon, capSprayHost} {
+	for _, name := range []string{capSprayBrute} {
 		if quick.Enabled(name) {
 			t.Fatalf("quick profile should not enable %s", name)
 		}
@@ -53,13 +58,24 @@ func TestScanProfilesAssembleCapabilities(t *testing.T) {
 	if err != nil {
 		t.Fatalf("full profile error = %v", err)
 	}
-	for _, name := range []string{capSprayCommon, capSprayBackup, capSprayActive, capSprayRecon, capSprayCrawl, capSprayHost, capZombieWeakpass, capNeutronPOC} {
+	for _, name := range []string{capGogoPortscan, capSprayCheck, capSprayFinger, capCoreWeb, capSprayCommon, capSprayBackup, capSprayActive, capSprayCrawl, capSprayBrute, capZombieWeakpass, capNeutronPOC} {
 		if !full.Enabled(name) {
 			t.Fatalf("full profile missing %s", name)
 		}
 	}
-	if !full.AllowBroadPOC {
-		t.Fatal("full profile should allow broader POC checks")
+	if full.AllowBroadPOC {
+		t.Fatal("full profile should not run broad POC checks without --broad-poc")
+	}
+}
+
+func TestScanAcceptsBroadPOCFlag(t *testing.T) {
+	cmd := New(&engines.Set{Spray: spray.NewEngine(nil)})
+	out, err := cmd.Execute(context.Background(), []string{"-i", "http://127.0.0.1:1", "--mode", "full", "--broad-poc", "--timeout", "1"})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if !strings.Contains(out, "[scan] completed") {
+		t.Fatalf("output missing summary: %q", out)
 	}
 }
 
@@ -86,13 +102,24 @@ func TestScanOptionsResolveCredentialFlags(t *testing.T) {
 }
 
 func TestScanOptionsResolveDiscoveryFlags(t *testing.T) {
+	opts := resolveScanOptions(flags{Mode: scanModeQuick})
+	if opts.Discovery.Ports != scanQuickDefaultPorts || opts.Discovery.Version != scanGogoVersionLevel || opts.hasDiscoveryOverrides() {
+		t.Fatalf("quick discovery defaults = %#v", opts.Discovery)
+	}
+
+	opts = resolveScanOptions(flags{Mode: scanModeFull})
+	if opts.Discovery.Ports != scanFullDefaultPorts || opts.Discovery.Version != scanGogoVersionLevel || opts.hasDiscoveryOverrides() {
+		t.Fatalf("full discovery defaults = %#v", opts.Discovery)
+	}
+
 	flagValues := flags{
+		Mode:    scanModeFull,
 		Ports:   "top100",
 		Port:    "80,443",
 		Threads: 77,
 		Timeout: 6,
 	}
-	opts := resolveScanOptions(flagValues)
+	opts = resolveScanOptions(flagValues)
 	if opts.Discovery.Ports != "80,443" {
 		t.Fatalf("discovery ports = %q, want --port override", opts.Discovery.Ports)
 	}
@@ -103,12 +130,12 @@ func TestScanOptionsResolveDiscoveryFlags(t *testing.T) {
 		t.Fatal("expected discovery overrides")
 	}
 
-	opts = resolveScanOptions(flags{Ports: "top10", Threads: 5, Timeout: 9})
+	opts = resolveScanOptions(flags{Mode: scanModeFull, Ports: "top10", Threads: 5, Timeout: 9})
 	if opts.Discovery.Ports != "top10" || opts.Discovery.Timeout != 9 {
 		t.Fatalf("discovery fallback options = %#v", opts.Discovery)
 	}
-	if opts.hasDiscoveryOverrides() {
-		t.Fatal("default --ports should not count as explicit discovery override")
+	if !opts.hasDiscoveryOverrides() {
+		t.Fatal("--ports should count as explicit discovery override")
 	}
 }
 
@@ -144,7 +171,7 @@ func TestScanWarnsWhenDiscoveryFlagsCannotAffectGogoCapability(t *testing.T) {
 	var logBuf bytes.Buffer
 	cmd := New(&engines.Set{}, WithLogger(telemetry.NewLogger(telemetry.LogConfig{Output: &logBuf})))
 	profile := profile{Capabilities: capabilitySet(capGogoPortscan)}
-	caps := cmd.buildCapabilities(flags{}, scanOptions{Discovery: discoveryOptions{Ports: "top100", Explicit: true}}, profile, newPipelineState())
+	caps := cmd.buildCapabilities(flags{}, scanOptions{Discovery: discoveryOptions{Ports: "top100", Explicit: true}}, profile)
 	if len(caps) != 0 {
 		t.Fatalf("capabilities = %d, want 0 without gogo engine", len(caps))
 	}
@@ -157,7 +184,7 @@ func TestScanWarnsWhenCredentialFlagsCannotAffectWeakpassCapability(t *testing.T
 	var logBuf bytes.Buffer
 	cmd := New(&engines.Set{}, WithLogger(telemetry.NewLogger(telemetry.LogConfig{Output: &logBuf})))
 	profile := profile{Capabilities: capabilitySet(capZombieWeakpass)}
-	caps := cmd.buildCapabilities(flags{}, scanOptions{Credentials: credentialOptions{Users: []string{"root"}}}, profile, newPipelineState())
+	caps := cmd.buildCapabilities(flags{}, scanOptions{Credentials: credentialOptions{Users: []string{"root"}}}, profile)
 	if len(caps) != 0 {
 		t.Fatalf("capabilities = %d, want 0 without zombie engine", len(caps))
 	}
@@ -170,7 +197,7 @@ func TestScanWarnsWhenWebFlagsCannotAffectSprayCapability(t *testing.T) {
 	var logBuf bytes.Buffer
 	cmd := New(&engines.Set{}, WithLogger(telemetry.NewLogger(telemetry.LogConfig{Output: &logBuf})))
 	profile := profile{Capabilities: capabilitySet(capSprayCommon)}
-	caps := cmd.buildCapabilities(flags{}, scanOptions{Web: webOptions{Dictionaries: []string{"paths.txt"}}}, profile, newPipelineState())
+	caps := cmd.buildCapabilities(flags{}, scanOptions{Web: webOptions{Dictionaries: []string{"paths.txt"}}}, profile)
 	if len(caps) != 0 {
 		t.Fatalf("capabilities = %d, want 0 without spray engine", len(caps))
 	}
@@ -224,6 +251,27 @@ func TestSprayCapabilityAppliesWebStrategyOptions(t *testing.T) {
 	}
 }
 
+func TestApplyWebStrategyOptionsEnablesReconAndPreservesCapabilityDefaults(t *testing.T) {
+	web := webOptions{
+		Dictionaries: []string{"paths.txt"},
+		Rules:        []string{"rules.txt"},
+		Word:         "admin",
+	}
+	opts := applyWebStrategyOptions(flags{SprayThreads: 7, Timeout: 9}, web, sprayCheckOptions{DefaultDict: true, BakPlugin: true})
+	if !opts.ReconPlugin || !opts.DefaultDict || !opts.BakPlugin {
+		t.Fatalf("spray options should preserve capability defaults and enable recon: %#v", opts)
+	}
+	if opts.FuzzuliPlugin {
+		t.Fatalf("backup capability should not enable fuzzuli by default: %#v", opts)
+	}
+	if opts.Threads != 7 || opts.Timeout != 9 || opts.Word != "admin" {
+		t.Fatalf("spray runtime options = %#v", opts)
+	}
+	if !reflect.DeepEqual(opts.Dictionaries, web.Dictionaries) || !reflect.DeepEqual(opts.Rules, web.Rules) {
+		t.Fatalf("spray dictionaries/rules = %#v/%#v", opts.Dictionaries, opts.Rules)
+	}
+}
+
 func TestScanBuildCapabilitiesKeepsSprayAndGogoConcurrent(t *testing.T) {
 	cmd := New(&engines.Set{
 		Gogo:  sdkgogo.NewEngine(nil),
@@ -236,12 +284,11 @@ func TestScanBuildCapabilitiesKeepsSprayAndGogoConcurrent(t *testing.T) {
 		capSprayCommon,
 		capSprayBackup,
 		capSprayActive,
-		capSprayRecon,
 		capSprayCrawl,
-		capSprayHost,
+		capSprayBrute,
 	)}
 
-	caps := cmd.buildCapabilities(flags{}, scanOptions{}, profile, newPipelineState())
+	caps := cmd.buildCapabilities(flags{}, scanOptions{}, profile)
 	workers := make(map[string]int, len(caps))
 	for _, cap := range caps {
 		workers[cap.Name] = cap.Worker
@@ -254,9 +301,8 @@ func TestScanBuildCapabilitiesKeepsSprayAndGogoConcurrent(t *testing.T) {
 		capSprayCommon:  2,
 		capSprayBackup:  2,
 		capSprayActive:  2,
-		capSprayRecon:   2,
 		capSprayCrawl:   2,
-		capSprayHost:    2,
+		capSprayBrute:   2,
 	}
 	for name, wantWorkers := range want {
 		if got := workers[name]; got != wantWorkers {
@@ -265,7 +311,7 @@ func TestScanBuildCapabilitiesKeepsSprayAndGogoConcurrent(t *testing.T) {
 	}
 }
 
-func TestScanSeedEventsFromInputs(t *testing.T) {
+func TestScanSeedTargetsFromInputs(t *testing.T) {
 	tests := []struct {
 		name  string
 		input string
@@ -274,7 +320,7 @@ func TestScanSeedEventsFromInputs(t *testing.T) {
 		{
 			name:  "url",
 			input: "http://example.com",
-			kinds: []targetKind{targetWeb, targetHostCandidate, targetWeakpass},
+			kinds: []targetKind{targetWeb, targetWeakpass},
 		},
 		{
 			name:  "hostport web",
@@ -291,18 +337,99 @@ func TestScanSeedEventsFromInputs(t *testing.T) {
 			input: "ssh://root@127.0.0.1:22",
 			kinds: []targetKind{targetWeakpass},
 		},
+		{
+			name:  "invalid path without scheme",
+			input: "example.com/path",
+			kinds: nil,
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			var got []targetKind
-			for _, event := range seedEventsFromInput(tt.input) {
-				if event.Target != nil {
-					got = append(got, event.Target.Kind())
-				}
+			for _, target := range seedTargetsFromInput(tt.input) {
+				got = append(got, target.Kind())
 			}
 			if !reflect.DeepEqual(got, tt.kinds) {
 				t.Fatalf("kinds = %#v, want %#v", got, tt.kinds)
+			}
+		})
+	}
+}
+
+func TestScanReadInputsFromListFile(t *testing.T) {
+	listFile := filepath.Join(t.TempDir(), "targets.txt")
+	if err := os.WriteFile(listFile, []byte(`
+# cidr, ip, and url list
+127.0.0.1/32
+  192.0.2.10
+http://127.0.0.1:8080
+https://example.com
+
+`), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := readInputs([]string{"  http://localhost:18080  ", ""}, listFile)
+	if err != nil {
+		t.Fatalf("readInputs() error = %v", err)
+	}
+	want := []string{
+		"http://localhost:18080",
+		"127.0.0.1/32",
+		"192.0.2.10",
+		"http://127.0.0.1:8080",
+		"https://example.com",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("inputs = %#v, want %#v", got, want)
+	}
+}
+
+func TestScanBuildSeedTargetsFromBatchInputs(t *testing.T) {
+	tests := []struct {
+		name   string
+		inputs []string
+		want   map[targetKind]int
+	}{
+		{
+			name:   "cidr",
+			inputs: []string{"127.0.0.1/32"},
+			want: map[targetKind]int{
+				targetScan: 1,
+			},
+		},
+		{
+			name:   "iplist",
+			inputs: []string{"127.0.0.1", "192.0.2.10"},
+			want: map[targetKind]int{
+				targetScan: 2,
+			},
+		},
+		{
+			name:   "urllist",
+			inputs: []string{"http://127.0.0.1:8080", "https://example.com"},
+			want: map[targetKind]int{
+				targetWeb:      2,
+				targetWeakpass: 2,
+			},
+		},
+		{
+			name:   "mixed",
+			inputs: []string{"127.0.0.1/32", "127.0.0.1", "127.0.0.1:8080", "http://example.com", "ssh://root@127.0.0.1:22", "example.com/path"},
+			want: map[targetKind]int{
+				targetScan:     3,
+				targetWeb:      2,
+				targetWeakpass: 3,
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := countTargetKinds(buildSeedTargets(tt.inputs, nil))
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Fatalf("seed target counts = %#v, want %#v", got, tt.want)
 			}
 		})
 	}
@@ -345,15 +472,53 @@ func TestScanTargetConstructorsNormalizeFields(t *testing.T) {
 	if web.Raw != "raw" || web.URL != "http://example.com" || web.HostHeader != "host.example" {
 		t.Fatalf("web target = %#v", web)
 	}
-
-	host := newHostCandidateTarget(" raw ", " Example.COM ")
-	if host.Raw != "raw" || host.Host != "example.com" {
-		t.Fatalf("host target = %#v", host)
+	if event := targetEvent(inputSource, "", web); event.Raw != "raw" {
+		t.Fatalf("target event raw = %q, want target raw", event.Raw)
 	}
 
 	poc := newPOCTarget(" raw ", " http://example.com ", []string{"Nginx", "nginx", "PHP"})
 	if poc.Raw != "raw" || poc.Target != "http://example.com" || !reflect.DeepEqual(poc.Fingers, []string{"nginx", "php"}) {
 		t.Fatalf("poc target = %#v", poc)
+	}
+}
+
+func TestPOCCapabilitySkipsUnfingerprintedTargetsByDefault(t *testing.T) {
+	cmd := New(&engines.Set{})
+	var events []event
+	cmd.runPOCCapability(context.Background(), flags{}, newPOCTarget("", "http://127.0.0.1", nil), func(event event) {
+		events = append(events, event)
+	})
+
+	if len(events) != 0 {
+		t.Fatalf("events = %#v, want none", events)
+	}
+}
+
+func TestPOCCapabilitySkipsFingerWithoutMappedTemplates(t *testing.T) {
+	engine := newScanTestNeutronEngine(t, scanTestTemplate("nginx-poc", "nginx"))
+	index := association.NewFingerPOCIndex()
+	index.BuildFromTemplates(engine.Get())
+	cmd := New(&engines.Set{Neutron: engine, Index: index})
+
+	var events []event
+	cmd.runPOCCapability(context.Background(), flags{}, newPOCTarget("", "http://127.0.0.1", []string{"unknown"}), func(event event) {
+		events = append(events, event)
+	})
+
+	if len(events) != 0 {
+		t.Fatalf("events = %#v, want none", events)
+	}
+}
+
+func TestSelectNeutronTemplatesRequiresFingerUnlessBroad(t *testing.T) {
+	selected, filtered := selectNeutronTemplates(nil, nil, neutronExecuteOptions{})
+	if len(selected) != 0 || !filtered {
+		t.Fatalf("default selection = %#v filtered=%v, want empty filtered selection", selected, filtered)
+	}
+
+	selected, filtered = selectNeutronTemplates(nil, nil, neutronExecuteOptions{Broad: true})
+	if len(selected) != 0 || filtered {
+		t.Fatalf("broad selection = %#v filtered=%v, want unfiltered selection", selected, filtered)
 	}
 }
 
@@ -363,7 +528,7 @@ func TestScanDerivesTargetsFromResults(t *testing.T) {
 	result.Protocol = "http"
 
 	var events []event
-	deriveServiceResult(profile, serviceResult{Result: result}, func(event event) {
+	deriveServiceResult(profile, capGogoPortscan, serviceResult{Result: result}, func(event event) {
 		events = append(events, event)
 	})
 
@@ -377,7 +542,6 @@ func TestScanDerivesTargetsFromResults(t *testing.T) {
 
 func TestScanPipelineDoesNotDispatchFindingOrError(t *testing.T) {
 	projector := newProjector([]string{"seed"}, projectorOptions{})
-	state := newPipelineState()
 	var runs int
 	capabilities := []capability{
 		{
@@ -389,7 +553,7 @@ func TestScanPipelineDoesNotDispatchFindingOrError(t *testing.T) {
 			},
 		},
 	}
-	pipeline := newPipeline(context.Background(), state, capabilities, projector, false)
+	pipeline := newPipeline(context.Background(), capabilities, projector, false)
 	pipeline.Run([]event{
 		findingEvent("test", fingerprintFinding{Target: "http://127.0.0.1", Fingers: []string{"nginx"}}),
 		errorEventOf("test", "boom"),
@@ -420,7 +584,6 @@ func TestFindingPriorityDefaults(t *testing.T) {
 
 func TestScanPipelineDispatchesHighPriorityFindingToAgentVerifier(t *testing.T) {
 	projector := newProjector([]string{"seed"}, projectorOptions{})
-	state := newPipelineState()
 	var runs int
 	capabilities := []capability{
 		{
@@ -442,7 +605,7 @@ func TestScanPipelineDispatchesHighPriorityFindingToAgentVerifier(t *testing.T) 
 			},
 		},
 	}
-	pipeline := newPipeline(context.Background(), state, capabilities, projector, false)
+	pipeline := newPipeline(context.Background(), capabilities, projector, false)
 	pipeline.Run([]event{
 		findingEvent("test", fingerprintFinding{Target: "http://127.0.0.1", Fingers: []string{"nginx"}}),
 		findingEvent("test", vulnFinding{Message: "[vuln] http://127.0.0.1 template=test severity=high"}),
@@ -472,8 +635,7 @@ func TestAgentVerifyCapabilityUsesProviderAndEmitsVerification(t *testing.T) {
 		t.Fatal("agent verifier capability was not built")
 	}
 	projector := newProjector([]string{"seed"}, projectorOptions{})
-	state := newPipelineState()
-	pipeline := newPipeline(context.Background(), state, []capability{cap}, projector, false)
+	pipeline := newPipeline(context.Background(), []capability{cap}, projector, false)
 	pipeline.Run([]event{
 		findingEvent(capNeutronPOC, vulnFinding{Message: "[vuln] http://127.0.0.1 template=test severity=high"}),
 	})
@@ -499,7 +661,6 @@ func TestAgentVerifyCapabilityUsesProviderAndEmitsVerification(t *testing.T) {
 
 func TestScanPipelineFanoutAndDedup(t *testing.T) {
 	projector := newProjector([]string{"seed"}, projectorOptions{})
-	state := newPipelineState()
 	var mu sync.Mutex
 	seen := make([]string, 0)
 
@@ -536,7 +697,7 @@ func TestScanPipelineFanoutAndDedup(t *testing.T) {
 		},
 	}
 
-	pipeline := newPipeline(context.Background(), state, capabilities, projector, false)
+	pipeline := newPipeline(context.Background(), capabilities, projector, false)
 	result := parsers.NewGOGOResult("127.0.0.1", "80")
 	result.Protocol = "http"
 	service := targetEvent("test", "", newServiceTarget("", result))
@@ -563,11 +724,56 @@ func TestScanPipelineFanoutAndDedup(t *testing.T) {
 
 func mustZombieTarget(t *testing.T, raw string) sdkzombie.Target {
 	t.Helper()
-	target, ok := parseZombieTarget(raw, "")
+	parsed, ok := parseInputURL(raw)
 	if !ok {
-		t.Fatalf("parseZombieTarget(%q) failed", raw)
+		t.Fatalf("parseInputURL(%q) failed", raw)
+	}
+	target, ok := zombieTargetFromParsedURL(parsed, "")
+	if !ok {
+		t.Fatalf("zombieTargetFromParsedURL(%q) failed", raw)
 	}
 	return target
+}
+
+func newScanTestNeutronEngine(t *testing.T, items ...*templates.Template) *sdkneutron.Engine {
+	t.Helper()
+	engine, err := sdkneutron.NewEngineWithTemplates((sdkneutron.Templates{}).Merge(items))
+	if err != nil {
+		t.Fatalf("NewEngineWithTemplates() error = %v", err)
+	}
+	return engine
+}
+
+func scanTestTemplate(id string, fingers ...string) *templates.Template {
+	return &templates.Template{
+		Id:      id,
+		Fingers: fingers,
+		Info: templates.Info{
+			Name:     id,
+			Severity: "high",
+		},
+		RequestsHTTP: []*neutronhttp.Request{
+			{
+				Method: "GET",
+				Path:   []string{"{{BaseURL}}"},
+				Operators: operators.Operators{
+					Matchers: []*operators.Matcher{
+						{Type: "word", Words: []string{"definitely-not-present"}},
+					},
+				},
+			},
+		},
+	}
+}
+
+func countTargetKinds(targets []target) map[targetKind]int {
+	counts := make(map[targetKind]int)
+	for _, target := range targets {
+		if target != nil {
+			counts[target.Kind()]++
+		}
+	}
+	return counts
 }
 
 func hasTargetKind(events []event, kind targetKind) bool {
@@ -581,7 +787,6 @@ func hasTargetKind(events []event, kind targetKind) bool {
 
 func TestScanPipelineDebugTrace(t *testing.T) {
 	projector := newProjector([]string{"seed"}, projectorOptions{Debug: true})
-	state := newPipelineState()
 	capabilities := []capability{
 		{
 			Name:    "noop",
@@ -590,7 +795,7 @@ func TestScanPipelineDebugTrace(t *testing.T) {
 			Run:     func(context.Context, target, emitFunc) {},
 		},
 	}
-	pipeline := newPipeline(context.Background(), state, capabilities, projector, true)
+	pipeline := newPipeline(context.Background(), capabilities, projector, true)
 	pipeline.Run([]event{targetEvent("test", "", newWebTarget("", "http://127.0.0.1", ""))})
 
 	if len(projector.trace) == 0 {
@@ -608,7 +813,6 @@ func TestScanPipelineCancelReturns(t *testing.T) {
 	var once sync.Once
 
 	projector := newProjector([]string{"seed"}, projectorOptions{})
-	state := newPipelineState()
 	capabilities := []capability{
 		{
 			Name:    "wait",
@@ -620,7 +824,7 @@ func TestScanPipelineCancelReturns(t *testing.T) {
 			},
 		},
 	}
-	pipeline := newPipeline(ctx, state, capabilities, projector, false)
+	pipeline := newPipeline(ctx, capabilities, projector, false)
 
 	go func() {
 		pipeline.Run([]event{targetEvent("test", "", newWebTarget("", "http://127.0.0.1", ""))})

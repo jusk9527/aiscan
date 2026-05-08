@@ -21,11 +21,13 @@ Common usage:
 scan -i <target> --mode quick
 scan -i <target> --mode full
 scan -i <target> --mode quick --verify=high
-scan -i <target> --ports top1000
+scan -i <target> --mode full --port top1000
 scan -i <target> -j
 ```
 
 Notes:
 
+- `quick` uses gogo `-p all -v`; `full` uses gogo `-p -` and adds spray default-dictionary probing.
+- Spray web capabilities run with recon enabled in both profiles.
 - `scan --verify=<level>` enables AI verification for matching priority findings when an LLM provider is configured.
 - User intent decides whether scan output should be summarized, analyzed, validated, reported, or used to choose follow-up commands.

@@ -522,10 +522,6 @@ func formatTraceEvent(event pipelineEvent) string {
 		if target.HostHeader != "" {
 			line += " host=" + target.HostHeader
 		}
-	case hostCandidateTarget:
-		if target.Host != "" {
-			line += " host=" + target.Host
-		}
 	case pocTarget:
 		if target.Target != "" {
 			line += " target=" + target.Target

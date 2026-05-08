@@ -25,11 +25,12 @@ func profileForMode(mode string) (profile, error) {
 
 	quickCaps := []string{
 		capGogoPortscan,
-		capCoreService,
 		capSprayCheck,
 		capSprayFinger,
 		capCoreWeb,
 		capSprayCommon,
+		capSprayBackup,
+		capSprayActive,
 		capSprayCrawl,
 		capZombieWeakpass,
 		capNeutronPOC,
@@ -45,16 +46,12 @@ func profileForMode(mode string) (profile, error) {
 	case scanModeFull:
 		fullCaps := append([]string{}, quickCaps...)
 		fullCaps = append(fullCaps,
-			capSprayBackup,
-			capSprayActive,
-			capSprayRecon,
-			capSprayHost,
+			capSprayBrute,
 		)
 		return profile{
-			Name:          scanModeFull,
-			Capabilities:  capabilitySet(fullCaps...),
-			CrawlDepth:    2,
-			AllowBroadPOC: true,
+			Name:         scanModeFull,
+			Capabilities: capabilitySet(fullCaps...),
+			CrawlDepth:   2,
 		}, nil
 	default:
 		return profile{}, fmt.Errorf("unknown scan mode %q, expected quick or full", mode)

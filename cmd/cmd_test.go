@@ -38,6 +38,32 @@ func TestParseCLIScanExtractsLLMAndPassesScannerArgs(t *testing.T) {
 	}
 }
 
+func TestParseCLIScanExtractsBareLLMAliases(t *testing.T) {
+	parsed, err := parseCLI([]string{
+		"scan",
+		"-i", "127.0.0.1",
+		"--base-url", "https://api.deepseek.com",
+		"--api-key", "KEY",
+		"--model", "deepseek-v4-pro",
+		"--ai",
+	})
+	if err != nil {
+		t.Fatalf("parseCLI() error = %v", err)
+	}
+	wantArgs := []string{"scan", "-i", "127.0.0.1"}
+	if !reflect.DeepEqual(parsed.ScannerArgs, wantArgs) {
+		t.Fatalf("scanner args = %#v, want %#v", parsed.ScannerArgs, wantArgs)
+	}
+	opt := parsed.Option
+	if !opt.AI || opt.APIKey != "KEY" || opt.Model != "deepseek-v4-pro" || opt.BaseURL != "https://api.deepseek.com" {
+		t.Fatalf("llm options = %#v", opt.LLMOptions)
+	}
+	cfg := providerConfig(&opt)
+	if cfg.Provider != "deepseek" {
+		t.Fatalf("provider = %q, want deepseek", cfg.Provider)
+	}
+}
+
 func TestParseCLICyberhubModeRootAndPassthrough(t *testing.T) {
 	parsed, err := parseCLI([]string{
 		"--cyberhub-mode", "override",

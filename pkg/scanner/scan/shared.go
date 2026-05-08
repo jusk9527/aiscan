@@ -9,7 +9,6 @@ import (
 
 	"github.com/chainreactors/parsers"
 	sdkzombie "github.com/chainreactors/sdk/zombie"
-	"github.com/chainreactors/utils"
 	zombiepkg "github.com/chainreactors/zombie/pkg"
 )
 
@@ -42,38 +41,37 @@ func readInputs(inputs []string, listFile string) ([]string, error) {
 	return out, scanner.Err()
 }
 
-func parseZombieTarget(raw, serviceOverride string) (sdkzombie.Target, bool) {
-	raw = strings.TrimSpace(raw)
-	if raw == "" {
+func zombieTargetFromParsedURL(parsed *url.URL, serviceOverride string) (sdkzombie.Target, bool) {
+	if parsed == nil || parsed.Hostname() == "" {
 		return sdkzombie.Target{}, false
 	}
-
-	var target sdkzombie.Target
-	if strings.Contains(raw, "://") {
-		parsed, err := url.Parse(raw)
-		if err != nil || parsed.Hostname() == "" {
-			return sdkzombie.Target{}, false
-		}
-		target.IP = parsed.Hostname()
-		target.Port = parsed.Port()
-		target.Scheme = parsed.Scheme
-		target.Service = parsed.Scheme
-		if service, ok := parsers.ZombieServiceFromName(parsed.Scheme); ok {
-			target.Service = service
-		}
-		if parsed.User != nil {
-			target.Username = parsed.User.Username()
-			target.Password, _ = parsed.User.Password()
-		}
-	} else if host, port, ok := utils.SplitHostPort(raw); ok {
-		target.IP = host
-		target.Port = port
-		target.Service = zombiepkg.GetDefault(port)
-		target.Scheme = target.Service
-	} else {
-		target.IP = raw
+	target := sdkzombie.Target{
+		IP:      parsed.Hostname(),
+		Port:    parsed.Port(),
+		Scheme:  parsed.Scheme,
+		Service: parsed.Scheme,
 	}
+	if service, ok := parsers.ZombieServiceFromName(parsed.Scheme); ok {
+		target.Service = service
+	}
+	if parsed.User != nil {
+		target.Username = parsed.User.Username()
+		target.Password, _ = parsed.User.Password()
+	}
+	return normalizeZombieTarget(target, serviceOverride)
+}
 
+func zombieTargetFromHostPort(host, port, serviceOverride string) (sdkzombie.Target, bool) {
+	service := zombiepkg.GetDefault(port)
+	return normalizeZombieTarget(sdkzombie.Target{
+		IP:      strings.TrimSpace(host),
+		Port:    strings.TrimSpace(port),
+		Service: service,
+		Scheme:  service,
+	}, serviceOverride)
+}
+
+func normalizeZombieTarget(target sdkzombie.Target, serviceOverride string) (sdkzombie.Target, bool) {
 	if serviceOverride != "" {
 		service := strings.ToLower(serviceOverride)
 		if mapped, ok := parsers.ZombieServiceFromName(service); ok {

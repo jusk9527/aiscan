@@ -23,6 +23,24 @@ type Set struct {
 	Resources *resources.Set
 }
 
+// CapacityConfig holds per-engine capacity limits. Zero means unlimited.
+type CapacityConfig struct {
+	Gogo    int // total concurrent scan threads (default: 5000)
+	Spray   int // total concurrent HTTP threads (default: 200)
+	Zombie  int // total concurrent auth threads (default: 500)
+	Neutron int // total concurrent template executions (default: 10)
+}
+
+// DefaultCapacity returns sensible capacity defaults.
+func DefaultCapacity() CapacityConfig {
+	return CapacityConfig{
+		Gogo:    5000,
+		Spray:   200,
+		Zombie:  500,
+		Neutron: 10,
+	}
+}
+
 func (e *Set) Close() {
 	if e.Fingers != nil {
 		e.Fingers.Close()
@@ -54,6 +72,10 @@ func InitWithLogger(ctx context.Context, cyberhubURL, apiKey string, logger tele
 }
 
 func InitWithOptions(ctx context.Context, opts resources.Options, logger telemetry.Logger) (*Set, error) {
+	return InitWithCapacity(ctx, opts, DefaultCapacity(), logger)
+}
+
+func InitWithCapacity(ctx context.Context, opts resources.Options, caps CapacityConfig, logger telemetry.Logger) (*Set, error) {
 	if logger == nil {
 		logger = telemetry.NopLogger()
 	}
@@ -115,6 +137,9 @@ func InitWithOptions(ctx context.Context, opts resources.Options, logger telemet
 	if set.Neutron != nil {
 		gogoConfig.WithNeutronEngine(set.Neutron)
 	}
+	if caps.Gogo > 0 {
+		gogoConfig.WithCapacity(caps.Gogo)
+	}
 	set.Gogo = gogo.NewEngine(gogoConfig)
 	logger.Infof("gogo engine initialized")
 
@@ -123,15 +148,26 @@ func InitWithOptions(ctx context.Context, opts resources.Options, logger telemet
 	if set.Fingers != nil {
 		sprayConfig.WithFingersEngine(set.Fingers)
 	}
+	if caps.Spray > 0 {
+		sprayConfig.WithCapacity(caps.Spray)
+	}
 	set.Spray = spray.NewEngine(sprayConfig)
 	logger.Infof("spray engine initialized")
 
-	set.Zombie = sdkzombie.NewEngine(sdkzombie.NewConfig())
+	zombieConfig := sdkzombie.NewConfig()
+	if caps.Zombie > 0 {
+		zombieConfig.WithCapacity(caps.Zombie)
+	}
+	set.Zombie = sdkzombie.NewEngine(zombieConfig)
 	if err := set.Zombie.Init(); err != nil {
 		logger.Warnf("init zombie engine failed: %v, continuing without zombie", err)
 		set.Zombie = nil
 	} else {
 		logger.Infof("zombie engine initialized")
+	}
+
+	if set.Neutron != nil && caps.Neutron > 0 {
+		set.Neutron.SetCapacity(caps.Neutron)
 	}
 
 	return set, nil

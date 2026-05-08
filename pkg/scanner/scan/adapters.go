@@ -3,15 +3,12 @@ package scan
 import (
 	"context"
 	"fmt"
-	"net"
-	"net/url"
-	"strings"
 
 	"github.com/chainreactors/parsers"
 	sdkzombie "github.com/chainreactors/sdk/zombie"
 )
 
-func (c *Command) runPortDiscoveryCapability(ctx context.Context, discovery discoveryOptions, input target, emit emitFunc) {
+func (c *Command) runPortDiscoveryCapability(ctx context.Context, discovery discoveryOptions, profile profile, input target, emit emitFunc) {
 	target, ok := input.(scanTarget)
 	if !ok {
 		return
@@ -22,10 +19,11 @@ func (c *Command) runPortDiscoveryCapability(ctx context.Context, discovery disc
 	}
 	c.logger.Infof("[scan:%s] scanning %s ports=%s", capGogoPortscan, target.Target, ports)
 	resultCh, err := gogoScanStream(ctx, c.engines.Gogo, gogoScanOptions{
-		Target:  target.Target,
-		Ports:   ports,
-		Threads: discovery.Threads,
-		Timeout: discovery.Timeout,
+		Target:       target.Target,
+		Ports:        ports,
+		Threads:      discovery.Threads,
+		Timeout:      discovery.Timeout,
+		VersionLevel: discovery.Version,
 	})
 	if err != nil {
 		emit(errorEventOf(capGogoPortscan, fmt.Sprintf("gogo %s: %v", target.Target, err)))
@@ -39,15 +37,8 @@ func (c *Command) runPortDiscoveryCapability(ctx context.Context, discovery disc
 			continue
 		}
 		emit(targetEvent(capGogoPortscan, target.Raw, newServiceTarget(target.Raw, result)))
+		deriveServiceResult(profile, capGogoPortscan, serviceResult{Result: result}, emit)
 	}
-}
-
-func runServiceAnalysisCapability(_ context.Context, profile profile, input target, emit emitFunc) {
-	target, ok := input.(serviceTarget)
-	if !ok || target.Result == nil {
-		return
-	}
-	deriveServiceResult(profile, serviceResult{Result: target.Result}, emit)
 }
 
 func (c *Command) runSprayCapability(ctx context.Context, flags flags, web webOptions, input target, source string, opts sprayCheckOptions, emit emitFunc) {
@@ -55,15 +46,9 @@ func (c *Command) runSprayCapability(ctx context.Context, flags flags, web webOp
 	if !ok || target.URL == "" {
 		return
 	}
+	opts = applyWebStrategyOptions(flags, web, opts)
 	opts.URLs = []string{target.URL}
 	opts.Host = target.HostHeader
-	opts.Dictionaries = web.Dictionaries
-	opts.Rules = web.Rules
-	opts.Word = web.Word
-	opts.DefaultDict = web.DefaultDict
-	opts.Advance = web.Advance
-	opts.Threads = flags.SprayThreads
-	opts.Timeout = flags.Timeout
 
 	resultCh, err := sprayCheckStream(ctx, c.engines.Spray, opts)
 	if err != nil {
@@ -81,48 +66,24 @@ func (c *Command) runSprayCapability(ctx context.Context, flags flags, web webOp
 	}
 }
 
+func applyWebStrategyOptions(flags flags, web webOptions, opts sprayCheckOptions) sprayCheckOptions {
+	opts.Dictionaries = append([]string(nil), web.Dictionaries...)
+	opts.Rules = append([]string(nil), web.Rules...)
+	opts.Word = web.Word
+	opts.DefaultDict = opts.DefaultDict || web.DefaultDict
+	opts.Advance = opts.Advance || web.Advance
+	opts.ReconPlugin = true
+	opts.Threads = flags.SprayThreads
+	opts.Timeout = flags.Timeout
+	return opts
+}
+
 func runWebResultAnalysisCapability(_ context.Context, profile profile, input target, emit emitFunc) {
 	target, ok := input.(webProbeTarget)
 	if !ok || !reportableSprayResult(target.Result) {
 		return
 	}
 	deriveWebProbeResult(profile, webProbeResult{Source: target.Capability, Result: target.Result, HostHeader: target.HostHeader}, emit)
-}
-
-func (c *Command) runHostCollisionCapability(ctx context.Context, flags flags, web webOptions, state *pipelineState, input target, emit emitFunc) {
-	switch target := input.(type) {
-	case webTarget:
-		c.runHostCollisionForEndpoint(ctx, flags, web, state, target, state.hostCandidateList(), emit)
-	case hostCandidateTarget:
-		host := strings.ToLower(strings.TrimSpace(target.Host))
-		if host == "" {
-			return
-		}
-		for _, endpoint := range state.webEndpointList() {
-			c.runHostCollisionForEndpoint(ctx, flags, web, state, endpoint, []string{host}, emit)
-		}
-	}
-}
-
-func (c *Command) runHostCollisionForEndpoint(ctx context.Context, flags flags, web webOptions, state *pipelineState, target webTarget, hosts []string, emit emitFunc) {
-	if target.URL == "" || target.HostHeader != "" {
-		return
-	}
-	parsed, err := url.Parse(target.URL)
-	if err != nil || parsed.Hostname() == "" || net.ParseIP(parsed.Hostname()) == nil {
-		return
-	}
-	for _, host := range hosts {
-		if strings.EqualFold(host, parsed.Hostname()) {
-			continue
-		}
-		if !state.markHostCollision(target.URL, host) {
-			continue
-		}
-		c.runSprayCapability(ctx, flags, web, newWebTarget(target.Raw, target.URL, host), capSprayHost, sprayCheckOptions{
-			Finger: true,
-		}, emit)
-	}
 }
 
 func (c *Command) runWeakpassCapability(ctx context.Context, flags flags, credentials credentialOptions, input target, emit emitFunc) {
@@ -159,13 +120,17 @@ func (c *Command) runPOCCapability(ctx context.Context, flags flags, input targe
 	if !ok || target.Target == "" {
 		return
 	}
+	fingers := parsers.NormalizeNames(target.Fingers)
+	if len(fingers) == 0 && !flags.BroadPOC {
+		return
+	}
 	resultCh, err := neutronExecuteStream(ctx, c.engines.Neutron, c.engines.Index, neutronExecuteOptions{
 		Target:       target.Target,
-		Fingers:      parsers.NormalizeNames(target.Fingers),
+		Fingers:      fingers,
 		MaxPerFinger: flags.MaxNeutronPerFP,
+		Broad:        flags.BroadPOC,
 	})
 	if err == errNoNeutronTemplates {
-		emit(errorEventOf(capNeutronPOC, fmt.Sprintf("neutron %s: skipped, no templates selected", target.Target)))
 		return
 	}
 	if err != nil {

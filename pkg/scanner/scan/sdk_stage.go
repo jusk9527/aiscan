@@ -21,10 +21,11 @@ var errNoNeutronTemplates = errors.New("no neutron templates selected")
 const gogoTempLogFile = ".sock.lock"
 
 type gogoScanOptions struct {
-	Target  string
-	Ports   string
-	Threads int
-	Timeout int
+	Target       string
+	Ports        string
+	Threads      int
+	Timeout      int
+	VersionLevel int
 }
 
 type sprayCheckOptions struct {
@@ -60,6 +61,7 @@ type neutronExecuteOptions struct {
 	Target       string
 	Fingers      []string
 	MaxPerFinger int
+	Broad        bool
 }
 
 func gogoScanStream(ctx context.Context, engine *gogo.GogoEngine, opts gogoScanOptions) (<-chan *parsers.GOGOResult, error) {
@@ -71,6 +73,9 @@ func gogoScanStream(ctx context.Context, engine *gogo.GogoEngine, opts gogoScanO
 	if opts.Timeout > 0 {
 		runOpt.Delay = opts.Timeout
 		runOpt.HttpsDelay = opts.Timeout
+	}
+	if opts.VersionLevel > 0 {
+		runOpt.VersionLevel = opts.VersionLevel
 	}
 	gogoCtx := gogo.NewContext().
 		WithContext(ctx).
@@ -212,7 +217,10 @@ func neutronExecuteStream(ctx context.Context, engine *neutron.Engine, index *as
 
 func selectNeutronTemplates(engine *neutron.Engine, index *association.FingerPOCIndex, opts neutronExecuteOptions) ([]*templates.Template, bool) {
 	if len(opts.Fingers) == 0 {
-		return nil, false
+		if opts.Broad {
+			return nil, false
+		}
+		return nil, true
 	}
 	if engine == nil {
 		return nil, true

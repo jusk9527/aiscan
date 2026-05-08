@@ -31,7 +31,6 @@ type eventSink interface {
 
 type pipeline struct {
 	ctx            context.Context
-	state          *pipelineState
 	capabilities   []capability
 	sink           eventSink
 	events         chan event
@@ -51,10 +50,9 @@ type capabilityInput struct {
 	event  event
 }
 
-func newPipeline(ctx context.Context, state *pipelineState, capabilities []capability, sink eventSink, debug bool) *pipeline {
+func newPipeline(ctx context.Context, capabilities []capability, sink eventSink, debug bool) *pipeline {
 	p := &pipeline{
 		ctx:            ctx,
-		state:          state,
 		capabilities:   capabilities,
 		sink:           sink,
 		events:         make(chan event, 1024),
@@ -149,7 +147,6 @@ func (p *pipeline) dispatch(event event) {
 	p.seenEvents[key] = struct{}{}
 	p.mu.Unlock()
 
-	p.state.record(event)
 	p.observe(pipelineEventAccept, "", event)
 	for _, cap := range p.capabilities {
 		input, ok := p.inputForCapability(cap, event)

@@ -6,7 +6,7 @@ import (
 	"github.com/chainreactors/aiscan/pkg/scanner/engines"
 )
 
-func (c *Command) buildCapabilities(flags flags, opts scanOptions, profile profile, state *pipelineState) []capability {
+func (c *Command) buildCapabilities(flags flags, opts scanOptions, profile profile) []capability {
 	if c.engines == nil {
 		c.engines = &engines.Set{}
 	}
@@ -19,7 +19,7 @@ func (c *Command) buildCapabilities(flags flags, opts scanOptions, profile profi
 		if !profile.Enabled(spec.Name) || !spec.Available(c.engines) {
 			continue
 		}
-		capabilities = append(capabilities, spec.Build(c, flags, opts, profile, state))
+		capabilities = append(capabilities, spec.Build(c, flags, opts, profile))
 		if spec.Name == capGogoPortscan {
 			gogoBuilt = true
 		}
@@ -50,34 +50,20 @@ func (c *Command) buildCapabilities(flags flags, opts scanOptions, profile profi
 type capabilitySpec struct {
 	Name      string
 	Available func(*engines.Set) bool
-	Build     func(*Command, flags, scanOptions, profile, *pipelineState) capability
+	Build     func(*Command, flags, scanOptions, profile) capability
 }
 
 var defaultCapabilitySpecs = []capabilitySpec{
 	{
 		Name:      capGogoPortscan,
 		Available: hasGogo,
-		Build: func(c *Command, _ flags, opts scanOptions, _ profile, _ *pipelineState) capability {
+		Build: func(c *Command, _ flags, opts scanOptions, profile profile) capability {
 			return capability{
 				Name:    capGogoPortscan,
 				Accepts: targetInputs(targetScan),
 				Worker:  4,
 				Run: func(ctx context.Context, target target, emit emitFunc) {
-					c.runPortDiscoveryCapability(ctx, opts.Discovery, target, emit)
-				},
-			}
-		},
-	},
-	{
-		Name:      capCoreService,
-		Available: alwaysAvailable,
-		Build: func(_ *Command, _ flags, _ scanOptions, profile profile, _ *pipelineState) capability {
-			return capability{
-				Name:    capCoreService,
-				Accepts: targetInputs(targetService),
-				Worker:  2,
-				Run: func(ctx context.Context, target target, emit emitFunc) {
-					runServiceAnalysisCapability(ctx, profile, target, emit)
+					c.runPortDiscoveryCapability(ctx, opts.Discovery, profile, target, emit)
 				},
 			}
 		},
@@ -87,7 +73,7 @@ var defaultCapabilitySpecs = []capabilitySpec{
 	{
 		Name:      capCoreWeb,
 		Available: alwaysAvailable,
-		Build: func(_ *Command, _ flags, _ scanOptions, profile profile, _ *pipelineState) capability {
+		Build: func(_ *Command, _ flags, _ scanOptions, profile profile) capability {
 			return capability{
 				Name:    capCoreWeb,
 				Accepts: targetInputs(targetWebProbe),
@@ -99,34 +85,20 @@ var defaultCapabilitySpecs = []capabilitySpec{
 		},
 	},
 	sprayCapabilitySpec(capSprayCommon, 2, sprayCheckOptions{CommonPlugin: true}),
-	sprayCapabilitySpec(capSprayBackup, 2, sprayCheckOptions{BakPlugin: true, FuzzuliPlugin: true}),
+	sprayCapabilitySpec(capSprayBackup, 2, sprayCheckOptions{BakPlugin: true}),
 	sprayCapabilitySpec(capSprayActive, 2, sprayCheckOptions{ActivePlugin: true, Finger: true}),
-	sprayCapabilitySpec(capSprayRecon, 2, sprayCheckOptions{ReconPlugin: true}),
 	{
 		Name:      capSprayCrawl,
 		Available: hasSpray,
-		Build: func(c *Command, flags flags, opts scanOptions, profile profile, _ *pipelineState) capability {
+		Build: func(c *Command, flags flags, opts scanOptions, profile profile) capability {
 			return sprayCapability(flags, opts.Web, capSprayCrawl, 2, sprayCheckOptions{Crawl: true, CrawlDepth: profile.CrawlDepth}, c.runSprayCapability)
 		},
 	},
-	{
-		Name:      capSprayHost,
-		Available: hasSpray,
-		Build: func(c *Command, flags flags, opts scanOptions, _ profile, state *pipelineState) capability {
-			return capability{
-				Name:    capSprayHost,
-				Accepts: targetInputs(targetWeb, targetHostCandidate),
-				Worker:  2,
-				Run: func(ctx context.Context, target target, emit emitFunc) {
-					c.runHostCollisionCapability(ctx, flags, opts.Web, state, target, emit)
-				},
-			}
-		},
-	},
+	sprayCapabilitySpec(capSprayBrute, 2, sprayCheckOptions{DefaultDict: true}),
 	{
 		Name:      capZombieWeakpass,
 		Available: hasZombie,
-		Build: func(c *Command, flags flags, opts scanOptions, _ profile, _ *pipelineState) capability {
+		Build: func(c *Command, flags flags, opts scanOptions, _ profile) capability {
 			return capability{
 				Name:    capZombieWeakpass,
 				Accepts: targetInputs(targetWeakpass),
@@ -140,7 +112,7 @@ var defaultCapabilitySpecs = []capabilitySpec{
 	{
 		Name:      capNeutronPOC,
 		Available: hasNeutron,
-		Build: func(c *Command, flags flags, _ scanOptions, _ profile, _ *pipelineState) capability {
+		Build: func(c *Command, flags flags, _ scanOptions, _ profile) capability {
 			return capability{
 				Name:    capNeutronPOC,
 				Accepts: targetInputs(targetPOC),
@@ -157,7 +129,7 @@ func sprayCapabilitySpec(name string, workers int, opts sprayCheckOptions) capab
 	return capabilitySpec{
 		Name:      name,
 		Available: hasSpray,
-		Build: func(c *Command, flags flags, scanOpts scanOptions, _ profile, _ *pipelineState) capability {
+		Build: func(c *Command, flags flags, scanOpts scanOptions, _ profile) capability {
 			return sprayCapability(flags, scanOpts.Web, name, workers, opts, c.runSprayCapability)
 		},
 	}
@@ -176,7 +148,7 @@ func sprayCapability(flags flags, web webOptions, name string, workers int, opts
 
 func isSprayCapability(name string) bool {
 	switch name {
-	case capSprayCheck, capSprayFinger, capSprayCommon, capSprayBackup, capSprayActive, capSprayRecon, capSprayCrawl, capSprayHost:
+	case capSprayCheck, capSprayFinger, capSprayCommon, capSprayBackup, capSprayActive, capSprayCrawl, capSprayBrute:
 		return true
 	default:
 		return false

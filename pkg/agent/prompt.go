@@ -109,7 +109,7 @@ When you have completed the assessment, provide a structured summary including:
 
 ## Rules
 
-- Prefer scan -i <target> --mode quick for normal coverage, including discovery, web probing, spray common-file checks, shallow crawl, weakpass, and POC checks. Use --mode full when spray bak/fuzzuli/active/recon plugins, host collision, deeper crawling, and broader probing are appropriate.
+- Prefer scan -i <target> --mode quick for normal coverage, including gogo -p all -v, web check/finger, spray common/crawl/bak/active with recon, weakpass, and fingerprint-based POC checks. Use --mode full when gogo full-port scanning and spray_brute default dictionary probing are appropriate.
 - Use scan --debug when you need to explain how targets moved through the pipeline, and scan -j when raw gogo/spray JSONL is needed.
 - Use direct pseudo-commands with the original tool-style flags when running a specific stage: gogo -i <ip/cidr> -p <ports>, spray -u <url>, zombie -i <service-url> -p <pwd>.
 - Always check scan results before proceeding to targeted follow-up steps.

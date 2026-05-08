@@ -1,5 +1,13 @@
 package scan
 
+import "strings"
+
+const (
+	scanQuickDefaultPorts = "all"
+	scanFullDefaultPorts  = "-"
+	scanGogoVersionLevel  = 1
+)
+
 type scanOptions struct {
 	Discovery   discoveryOptions
 	Web         webOptions
@@ -10,6 +18,7 @@ type discoveryOptions struct {
 	Ports    string
 	Threads  int
 	Timeout  int
+	Version  int
 	Explicit bool
 }
 
@@ -27,17 +36,20 @@ type credentialOptions struct {
 }
 
 func resolveScanOptions(flags flags) scanOptions {
-	ports := flags.Ports
-	explicitDiscovery := false
+	ports := defaultDiscoveryPorts(flags.Mode)
+	explicitDiscovery := flags.Ports != "" || flags.Port != ""
+	if flags.Ports != "" {
+		ports = flags.Ports
+	}
 	if flags.Port != "" {
 		ports = flags.Port
-		explicitDiscovery = true
 	}
 	return scanOptions{
 		Discovery: discoveryOptions{
 			Ports:    ports,
 			Threads:  flags.Threads,
 			Timeout:  flags.Timeout,
+			Version:  scanGogoVersionLevel,
 			Explicit: explicitDiscovery,
 		},
 		Web: webOptions{
@@ -52,6 +64,13 @@ func resolveScanOptions(flags flags) scanOptions {
 			Passwords: append([]string(nil), flags.Passwords...),
 		},
 	}
+}
+
+func defaultDiscoveryPorts(mode string) string {
+	if strings.EqualFold(strings.TrimSpace(mode), scanModeFull) {
+		return scanFullDefaultPorts
+	}
+	return scanQuickDefaultPorts
 }
 
 func (o scanOptions) hasWeakpassOverrides() bool {

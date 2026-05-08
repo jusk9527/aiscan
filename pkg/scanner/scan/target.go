@@ -12,18 +12,18 @@ import (
 type target interface {
 	Kind() targetKind
 	Key() string
+	RawInput() string
 }
 
 type targetKind string
 
 const (
-	targetScan          targetKind = "scan-target"
-	targetService       targetKind = "service-result"
-	targetWeb           targetKind = "web-target"
-	targetWebProbe      targetKind = "web-probe-result"
-	targetHostCandidate targetKind = "host-candidate"
-	targetWeakpass      targetKind = "weakpass-target"
-	targetPOC           targetKind = "poc-target"
+	targetScan     targetKind = "scan-target"
+	targetService  targetKind = "service-result"
+	targetWeb      targetKind = "web-target"
+	targetWebProbe targetKind = "web-probe-result"
+	targetWeakpass targetKind = "weakpass-target"
+	targetPOC      targetKind = "poc-target"
 )
 
 type scanTarget struct {
@@ -42,6 +42,8 @@ func newScanTarget(raw, target, ports string) scanTarget {
 
 func (t scanTarget) Kind() targetKind { return targetScan }
 
+func (t scanTarget) RawInput() string { return t.Raw }
+
 func (t scanTarget) Key() string {
 	return strings.ToLower(t.Target) + "|" + t.Ports
 }
@@ -59,6 +61,8 @@ func newServiceTarget(raw string, result *parsers.GOGOResult) serviceTarget {
 }
 
 func (t serviceTarget) Kind() targetKind { return targetService }
+
+func (t serviceTarget) RawInput() string { return t.Raw }
 
 func (t serviceTarget) Key() string {
 	if t.Result == nil {
@@ -83,6 +87,8 @@ func newWebTarget(raw, rawURL, hostHeader string) webTarget {
 
 func (t webTarget) Kind() targetKind { return targetWeb }
 
+func (t webTarget) RawInput() string { return t.Raw }
+
 func (t webTarget) Key() string {
 	return utils.NormalizeURL(t.URL) + "|host=" + strings.ToLower(t.HostHeader)
 }
@@ -105,6 +111,8 @@ func newWebProbeTarget(raw, capability, hostHeader string, result *parsers.Spray
 
 func (t webProbeTarget) Kind() targetKind { return targetWebProbe }
 
+func (t webProbeTarget) RawInput() string { return t.Raw }
+
 func (t webProbeTarget) Key() string {
 	if t.Result == nil {
 		return ""
@@ -117,24 +125,6 @@ func (t webProbeTarget) Key() string {
 		t.Result.Status,
 		t.Result.Source,
 	)
-}
-
-type hostCandidateTarget struct {
-	Host string
-	Raw  string
-}
-
-func newHostCandidateTarget(raw, host string) hostCandidateTarget {
-	return hostCandidateTarget{
-		Host: strings.ToLower(strings.TrimSpace(host)),
-		Raw:  strings.TrimSpace(raw),
-	}
-}
-
-func (t hostCandidateTarget) Kind() targetKind { return targetHostCandidate }
-
-func (t hostCandidateTarget) Key() string {
-	return strings.ToLower(strings.TrimSpace(t.Host))
 }
 
 type weakpassTarget struct {
@@ -154,6 +144,8 @@ func newWeakpassTarget(raw string, target sdkzombie.Target) weakpassTarget {
 }
 
 func (t weakpassTarget) Kind() targetKind { return targetWeakpass }
+
+func (t weakpassTarget) RawInput() string { return t.Raw }
 
 func (t weakpassTarget) Key() string {
 	target := t.Target
@@ -179,6 +171,8 @@ func newPOCTarget(raw, target string, fingers []string) pocTarget {
 }
 
 func (t pocTarget) Kind() targetKind { return targetPOC }
+
+func (t pocTarget) RawInput() string { return t.Raw }
 
 func (t pocTarget) Key() string {
 	return strings.ToLower(t.Target) + "|" + strings.Join(parsers.NormalizeNames(t.Fingers), ",")
