@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -410,6 +411,7 @@ var rootFlagValueArity = map[string]int{
 	"--prompt":        1,
 	"--task-file":     1,
 	"--skill":         1,
+	"--max-turns":     1,
 }
 
 func argsAfterCommand(args []string, command string) []string {
@@ -575,36 +577,44 @@ func applyScannerCommandArgs(scannerName string, args []string, option *Option) 
 				return nil, err
 			}
 			option.Skills = append(option.Skills, v)
-		case "--llm-provider":
+		case "--llm-provider", "--provider":
 			v, err := nextValue()
 			if err != nil {
 				return nil, err
 			}
 			option.Provider = v
-		case "--llm-base-url":
+		case "--llm-base-url", "--base-url":
 			v, err := nextValue()
 			if err != nil {
 				return nil, err
 			}
 			option.BaseURL = v
-		case "--llm-api-key":
+		case "--llm-api-key", "--api-key":
 			v, err := nextValue()
 			if err != nil {
 				return nil, err
 			}
 			option.APIKey = v
-		case "--llm-model":
+		case "--llm-model", "--model":
 			v, err := nextValue()
 			if err != nil {
 				return nil, err
 			}
 			option.Model = v
-		case "--llm-proxy":
+		case "--llm-proxy", "--proxy":
 			v, err := nextValue()
 			if err != nil {
 				return nil, err
 			}
 			option.Proxy = v
+		case "--max-turns":
+			v, err := nextValue()
+			if err != nil {
+				return nil, err
+			}
+			if n, e := strconv.Atoi(v); e == nil && n > 0 {
+				option.MaxTurns = n
+			}
 		default:
 			out = append(out, arg)
 		}

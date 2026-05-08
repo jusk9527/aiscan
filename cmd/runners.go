@@ -17,6 +17,7 @@ import (
 	"github.com/chainreactors/aiscan/pkg/scanner/scan"
 	"github.com/chainreactors/aiscan/pkg/telemetry"
 	"github.com/chainreactors/aiscan/pkg/tool"
+	"github.com/chainreactors/aiscan/pkg/tool/results"
 	"github.com/chainreactors/aiscan/skills"
 )
 
@@ -97,6 +98,7 @@ func runDirectScannerMode(ctx context.Context, option *Option, rest []string) er
 	if option.AI {
 		features.ProviderEnabled = true
 		features.ProviderOptional = false
+		features.ToolsEnabled = true
 	}
 	if isScannerHelpRequest(scannerArgs) {
 		if usage, ok := staticScannerUsage(scannerArgs[0]); ok {
@@ -116,6 +118,9 @@ func runDirectScannerMode(ctx context.Context, option *Option, rest []string) er
 
 	if !application.Scanner.Has(scannerArgs[0]) {
 		return fmt.Errorf("unknown subcommand: %s", scannerArgs[0])
+	}
+	if option.AI && scannerArgs[0] != "scan" {
+		return runScannerAgentMode(ctx, option, application, scannerArgs, logger)
 	}
 	var stream io.Writer
 	if option.NoColor && scannerArgs[0] == "scan" && !hasScannerFlag(scannerArgs[1:], "--no-color") {
@@ -143,6 +148,71 @@ func runDirectScannerMode(ctx context.Context, option *Option, rest []string) er
 		}
 	}
 	return nil
+}
+
+func runScannerAgentMode(ctx context.Context, option *Option, application *app.App, scannerArgs []string, logger telemetry.Logger) error {
+	if application.Provider == nil {
+		return fmt.Errorf("--ai requires a configured LLM provider")
+	}
+
+	toolReg := application.Tools
+	if toolReg == nil {
+		toolReg = tool.NewToolRegistry()
+	}
+	for _, t := range results.NewTools() {
+		toolReg.Register(t)
+	}
+
+	command := scannerArgs[0]
+	intent, err := resolveScannerAIIntent(option, application.Skills, command)
+	if err != nil {
+		return err
+	}
+	prompt := buildScannerAgentTaskPrompt(scannerArgs, intent)
+
+	systemPrompt := agent.BuildSystemPrompt(&agent.PromptConfig{
+		Tools:            toolReg,
+		ScannerDocs:      application.Scanner.UsageDocs(),
+		Skills:           application.Skills.Skills,
+		ScannerAgentMode: true,
+		ScannerName:      command,
+	})
+
+	maxTurns := option.MaxTurns
+	if maxTurns <= 0 {
+		maxTurns = 20
+	}
+
+	logger.Debugf("system prompt length: %d chars", len(systemPrompt))
+	logger.Importantf("starting %s agent mode (max_turns=%d)", command, maxTurns)
+	logger.Importantf("task: %s", prompt)
+
+	result, err := agent.Run(ctx, prompt, toolReg,
+		agent.WithProvider(application.Provider),
+		agent.WithMaxTurns(maxTurns),
+		agent.WithSystemPrompt(systemPrompt),
+		agent.WithModel(resolvedModel(option)),
+		agent.WithStream(true),
+		agent.WithLogger(logger),
+	)
+	if err != nil {
+		return err
+	}
+	if result != "" {
+		fmt.Println("\n" + strings.Repeat("=", 60))
+		fmt.Println("AGENT RESULT")
+		fmt.Println(strings.Repeat("=", 60))
+		fmt.Println(result)
+	}
+	return nil
+}
+
+func buildScannerAgentTaskPrompt(scannerArgs []string, intent string) string {
+	command := strings.Join(scannerArgs, " ")
+	if strings.TrimSpace(intent) == "" {
+		return fmt.Sprintf("Execute: %s", command)
+	}
+	return fmt.Sprintf("Execute: %s\n\nUser intent: %s", command, strings.TrimSpace(intent))
 }
 
 func runScannerAIProcess(ctx context.Context, option *Option, application *app.App, scannerArgs []string, output string, logger telemetry.Logger) (string, error) {
