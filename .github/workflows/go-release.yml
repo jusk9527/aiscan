@@ -1,0 +1,125 @@
+name: go-release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+            ext: ""
+          - goos: linux
+            goarch: arm64
+            ext: ""
+          - goos: darwin
+            goarch: amd64
+            ext: ""
+          - goos: darwin
+            goarch: arm64
+            ext: ""
+          - goos: windows
+            goarch: amd64
+            ext: ".exe"
+
+    steps:
+      - name: Checkout aiscan
+        uses: actions/checkout@v4
+        with:
+          path: aiscan
+
+      - name: Checkout local replace modules
+        uses: actions/checkout@v4
+        with:
+          repository: chainreactors/gogo
+          path: gogo
+
+      - uses: actions/checkout@v4
+        with:
+          repository: chainreactors/logs
+          path: logs
+
+      - uses: actions/checkout@v4
+        with:
+          repository: chainreactors/neutron
+          path: neutron
+
+      - uses: actions/checkout@v4
+        with:
+          repository: chainreactors/parsers
+          path: parsers
+
+      - uses: actions/checkout@v4
+        with:
+          repository: chainreactors/proxyclient
+          path: proxyclient
+
+      - uses: actions/checkout@v4
+        with:
+          repository: chainreactors/rem
+          path: rem
+
+      - uses: actions/checkout@v4
+        with:
+          repository: chainreactors/sdk
+          path: sdk
+
+      - uses: actions/checkout@v4
+        with:
+          repository: chainreactors/spray
+          path: spray
+
+      - uses: actions/checkout@v4
+        with:
+          repository: chainreactors/utils
+          path: utils
+
+      - uses: actions/checkout@v4
+        with:
+          repository: chainreactors/zombie
+          path: zombie
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: aiscan/go.mod
+          cache: true
+
+      - name: Build
+        working-directory: aiscan
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "0"
+        run: |
+          mkdir -p dist
+          go build -trimpath -tags "forceposix emptytemplates noembed" -ldflags="-s -w" -o "dist/aiscan${{ matrix.ext }}" ./cmd/aiscan
+
+      - name: Package
+        shell: bash
+        working-directory: aiscan
+        run: |
+          name="aiscan_${GITHUB_REF_NAME}_${{ matrix.goos }}_${{ matrix.goarch }}"
+          mkdir -p "dist/$name"
+          cp "dist/aiscan${{ matrix.ext }}" "dist/$name/"
+          if [ "${{ matrix.goos }}" = "windows" ]; then
+            (cd dist && zip -r "$name.zip" "$name")
+          else
+            tar -C dist -czf "dist/$name.tar.gz" "$name"
+          fi
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            aiscan/dist/*.tar.gz
+            aiscan/dist/*.zip

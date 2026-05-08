@@ -1,0 +1,932 @@
+package scan
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+	"reflect"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/chainreactors/aiscan/pkg/provider"
+	"github.com/chainreactors/aiscan/pkg/scanner/engines"
+	"github.com/chainreactors/aiscan/pkg/telemetry"
+	"github.com/chainreactors/parsers"
+	sdkgogo "github.com/chainreactors/sdk/gogo"
+	"github.com/chainreactors/sdk/spray"
+	sdkzombie "github.com/chainreactors/sdk/zombie"
+)
+
+func TestScanRunsWithOnlySprayStage(t *testing.T) {
+	cmd := New(&engines.Set{Spray: spray.NewEngine(nil)})
+	out, err := cmd.Execute(context.Background(), []string{"-i", "http://127.0.0.1:1", "--mode", "quick", "--timeout", "1"})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if !strings.Contains(out, "[scan] completed") {
+		t.Fatalf("output missing summary: %q", out)
+	}
+}
+
+func TestScanProfilesAssembleCapabilities(t *testing.T) {
+	quick, err := profileForMode("quick")
+	if err != nil {
+		t.Fatalf("quick profile error = %v", err)
+	}
+	for _, name := range []string{capGogoPortscan, capSprayCheck, capSprayFinger, capSprayCommon, capSprayCrawl, capZombieWeakpass, capNeutronPOC} {
+		if !quick.Enabled(name) {
+			t.Fatalf("quick profile missing %s", name)
+		}
+	}
+	for _, name := range []string{capSprayBackup, capSprayActive, capSprayRecon, capSprayHost} {
+		if quick.Enabled(name) {
+			t.Fatalf("quick profile should not enable %s", name)
+		}
+	}
+
+	full, err := profileForMode("full")
+	if err != nil {
+		t.Fatalf("full profile error = %v", err)
+	}
+	for _, name := range []string{capSprayCommon, capSprayBackup, capSprayActive, capSprayRecon, capSprayCrawl, capSprayHost, capZombieWeakpass, capNeutronPOC} {
+		if !full.Enabled(name) {
+			t.Fatalf("full profile missing %s", name)
+		}
+	}
+	if !full.AllowBroadPOC {
+		t.Fatal("full profile should allow broader POC checks")
+	}
+}
+
+func TestScanOptionsResolveCredentialFlags(t *testing.T) {
+	flags := flags{
+		Users:     []string{"root", "admin"},
+		Passwords: []string{"toor", "admin123"},
+	}
+	opts := resolveScanOptions(flags)
+	if !reflect.DeepEqual(opts.Credentials.Users, flags.Users) {
+		t.Fatalf("credential users = %#v, want %#v", opts.Credentials.Users, flags.Users)
+	}
+	if !reflect.DeepEqual(opts.Credentials.Passwords, flags.Passwords) {
+		t.Fatalf("credential passwords = %#v, want %#v", opts.Credentials.Passwords, flags.Passwords)
+	}
+	if !opts.hasWeakpassOverrides() {
+		t.Fatal("expected weakpass overrides")
+	}
+	flags.Users[0] = "mutated"
+	flags.Passwords[0] = "mutated"
+	if opts.Credentials.Users[0] != "root" || opts.Credentials.Passwords[0] != "toor" {
+		t.Fatalf("scan options aliases flags slices: %#v", opts.Credentials)
+	}
+}
+
+func TestScanOptionsResolveDiscoveryFlags(t *testing.T) {
+	flagValues := flags{
+		Ports:   "top100",
+		Port:    "80,443",
+		Threads: 77,
+		Timeout: 6,
+	}
+	opts := resolveScanOptions(flagValues)
+	if opts.Discovery.Ports != "80,443" {
+		t.Fatalf("discovery ports = %q, want --port override", opts.Discovery.Ports)
+	}
+	if opts.Discovery.Threads != 77 || opts.Discovery.Timeout != 6 {
+		t.Fatalf("discovery options = %#v", opts.Discovery)
+	}
+	if !opts.hasDiscoveryOverrides() {
+		t.Fatal("expected discovery overrides")
+	}
+
+	opts = resolveScanOptions(flags{Ports: "top10", Threads: 5, Timeout: 9})
+	if opts.Discovery.Ports != "top10" || opts.Discovery.Timeout != 9 {
+		t.Fatalf("discovery fallback options = %#v", opts.Discovery)
+	}
+	if opts.hasDiscoveryOverrides() {
+		t.Fatal("default --ports should not count as explicit discovery override")
+	}
+}
+
+func TestScanOptionsResolveWebStrategyFlags(t *testing.T) {
+	flags := flags{
+		Dictionaries: []string{"paths.txt", "api.txt"},
+		Rules:        []string{"rules.txt"},
+		Word:         "admin{?ld#2}",
+		DefaultDict:  true,
+		Advance:      true,
+	}
+	opts := resolveScanOptions(flags)
+	if !reflect.DeepEqual(opts.Web.Dictionaries, flags.Dictionaries) {
+		t.Fatalf("web dictionaries = %#v, want %#v", opts.Web.Dictionaries, flags.Dictionaries)
+	}
+	if !reflect.DeepEqual(opts.Web.Rules, flags.Rules) {
+		t.Fatalf("web rules = %#v, want %#v", opts.Web.Rules, flags.Rules)
+	}
+	if opts.Web.Word != flags.Word || !opts.Web.DefaultDict || !opts.Web.Advance {
+		t.Fatalf("web options = %#v", opts.Web)
+	}
+	if !opts.hasWebOverrides() {
+		t.Fatal("expected web overrides")
+	}
+	flags.Dictionaries[0] = "mutated"
+	flags.Rules[0] = "mutated"
+	if opts.Web.Dictionaries[0] != "paths.txt" || opts.Web.Rules[0] != "rules.txt" {
+		t.Fatalf("scan web options alias flags slices: %#v", opts.Web)
+	}
+}
+
+func TestScanWarnsWhenDiscoveryFlagsCannotAffectGogoCapability(t *testing.T) {
+	var logBuf bytes.Buffer
+	cmd := New(&engines.Set{}, WithLogger(telemetry.NewLogger(telemetry.LogConfig{Output: &logBuf})))
+	profile := profile{Capabilities: capabilitySet(capGogoPortscan)}
+	caps := cmd.buildCapabilities(flags{}, scanOptions{Discovery: discoveryOptions{Ports: "top100", Explicit: true}}, profile, newPipelineState())
+	if len(caps) != 0 {
+		t.Fatalf("capabilities = %d, want 0 without gogo engine", len(caps))
+	}
+	if !strings.Contains(logBuf.String(), "--port ignored") {
+		t.Fatalf("warning log missing discovery ignore message: %q", logBuf.String())
+	}
+}
+
+func TestScanWarnsWhenCredentialFlagsCannotAffectWeakpassCapability(t *testing.T) {
+	var logBuf bytes.Buffer
+	cmd := New(&engines.Set{}, WithLogger(telemetry.NewLogger(telemetry.LogConfig{Output: &logBuf})))
+	profile := profile{Capabilities: capabilitySet(capZombieWeakpass)}
+	caps := cmd.buildCapabilities(flags{}, scanOptions{Credentials: credentialOptions{Users: []string{"root"}}}, profile, newPipelineState())
+	if len(caps) != 0 {
+		t.Fatalf("capabilities = %d, want 0 without zombie engine", len(caps))
+	}
+	if !strings.Contains(logBuf.String(), "--user/--pwd ignored") {
+		t.Fatalf("warning log missing credential ignore message: %q", logBuf.String())
+	}
+}
+
+func TestScanWarnsWhenWebFlagsCannotAffectSprayCapability(t *testing.T) {
+	var logBuf bytes.Buffer
+	cmd := New(&engines.Set{}, WithLogger(telemetry.NewLogger(telemetry.LogConfig{Output: &logBuf})))
+	profile := profile{Capabilities: capabilitySet(capSprayCommon)}
+	caps := cmd.buildCapabilities(flags{}, scanOptions{Web: webOptions{Dictionaries: []string{"paths.txt"}}}, profile, newPipelineState())
+	if len(caps) != 0 {
+		t.Fatalf("capabilities = %d, want 0 without spray engine", len(caps))
+	}
+	if !strings.Contains(logBuf.String(), "--dict/--rule/--word/--default-dict/--advance ignored") {
+		t.Fatalf("warning log missing web ignore message: %q", logBuf.String())
+	}
+}
+
+func TestSprayCapabilityAppliesWebStrategyOptions(t *testing.T) {
+	var got sprayCheckOptions
+	web := webOptions{
+		Dictionaries: []string{"paths.txt"},
+		Rules:        []string{"rules.txt"},
+		Word:         "admin{?ld#2}",
+		DefaultDict:  true,
+		Advance:      true,
+	}
+	cap := sprayCapability(flags{SprayThreads: 7, Timeout: 9}, web, capSprayCommon, 1, sprayCheckOptions{CommonPlugin: true}, func(_ context.Context, flags flags, gotWeb webOptions, input target, source string, opts sprayCheckOptions, emit emitFunc) {
+		target, ok := input.(webTarget)
+		if !ok {
+			t.Fatalf("input = %#v, want webTarget", input)
+		}
+		opts.URLs = []string{target.URL}
+		opts.Threads = flags.SprayThreads
+		opts.Timeout = flags.Timeout
+		opts.Dictionaries = gotWeb.Dictionaries
+		opts.Rules = gotWeb.Rules
+		opts.Word = gotWeb.Word
+		opts.DefaultDict = gotWeb.DefaultDict
+		opts.Advance = gotWeb.Advance
+		got = opts
+		emit(targetEvent(source, target.Raw, newWebProbeTarget(target.Raw, source, "", &parsers.SprayResult{UrlString: target.URL, Status: 200, Distance: 1})))
+	})
+
+	var emitted []event
+	cap.Run(context.Background(), newWebTarget("raw", "http://127.0.0.1", ""), func(event event) {
+		emitted = append(emitted, event)
+	})
+
+	if !reflect.DeepEqual(got.Dictionaries, web.Dictionaries) || !reflect.DeepEqual(got.Rules, web.Rules) {
+		t.Fatalf("spray dictionaries/rules = %#v/%#v", got.Dictionaries, got.Rules)
+	}
+	if got.Word != web.Word || !got.DefaultDict || !got.Advance {
+		t.Fatalf("spray web strategy options = %#v", got)
+	}
+	if got.Threads != 7 || got.Timeout != 9 || !got.CommonPlugin {
+		t.Fatalf("spray base options = %#v", got)
+	}
+	if len(emitted) != 1 || emitted[0].Target == nil {
+		t.Fatalf("emitted = %#v, want one target event", emitted)
+	}
+}
+
+func TestScanBuildCapabilitiesKeepsSprayAndGogoConcurrent(t *testing.T) {
+	cmd := New(&engines.Set{
+		Gogo:  sdkgogo.NewEngine(nil),
+		Spray: spray.NewEngine(nil),
+	})
+	profile := profile{Capabilities: capabilitySet(
+		capGogoPortscan,
+		capSprayCheck,
+		capSprayFinger,
+		capSprayCommon,
+		capSprayBackup,
+		capSprayActive,
+		capSprayRecon,
+		capSprayCrawl,
+		capSprayHost,
+	)}
+
+	caps := cmd.buildCapabilities(flags{}, scanOptions{}, profile, newPipelineState())
+	workers := make(map[string]int, len(caps))
+	for _, cap := range caps {
+		workers[cap.Name] = cap.Worker
+	}
+
+	want := map[string]int{
+		capGogoPortscan: 4,
+		capSprayCheck:   4,
+		capSprayFinger:  4,
+		capSprayCommon:  2,
+		capSprayBackup:  2,
+		capSprayActive:  2,
+		capSprayRecon:   2,
+		capSprayCrawl:   2,
+		capSprayHost:    2,
+	}
+	for name, wantWorkers := range want {
+		if got := workers[name]; got != wantWorkers {
+			t.Fatalf("%s workers = %d, want %d", name, got, wantWorkers)
+		}
+	}
+}
+
+func TestScanSeedEventsFromInputs(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		kinds []targetKind
+	}{
+		{
+			name:  "url",
+			input: "http://example.com",
+			kinds: []targetKind{targetWeb, targetHostCandidate, targetWeakpass},
+		},
+		{
+			name:  "hostport web",
+			input: "127.0.0.1:8080",
+			kinds: []targetKind{targetScan, targetWeb, targetWeakpass},
+		},
+		{
+			name:  "cidr",
+			input: "192.168.1.0/24",
+			kinds: []targetKind{targetScan},
+		},
+		{
+			name:  "service url",
+			input: "ssh://root@127.0.0.1:22",
+			kinds: []targetKind{targetWeakpass},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var got []targetKind
+			for _, event := range seedEventsFromInput(tt.input) {
+				if event.Target != nil {
+					got = append(got, event.Target.Kind())
+				}
+			}
+			if !reflect.DeepEqual(got, tt.kinds) {
+				t.Fatalf("kinds = %#v, want %#v", got, tt.kinds)
+			}
+		})
+	}
+}
+
+func TestScanTargetKeys(t *testing.T) {
+	tests := []struct {
+		name   string
+		target target
+		want   string
+	}{
+		{
+			name:   "web normalizes url and host header",
+			target: newWebTarget(" raw ", "HTTP://Example.COM:80/a", "VHost.EXAMPLE"),
+			want:   "http://example.com:80/a|host=vhost.example",
+		},
+		{
+			name:   "poc normalizes fingers",
+			target: newPOCTarget(" raw ", "HTTP://Example.COM", []string{"Nginx", "nginx", "PHP"}),
+			want:   "http://example.com|nginx,php",
+		},
+		{
+			name:   "weakpass includes auth",
+			target: newWeakpassTarget(" raw ", mustZombieTarget(t, "ssh://root:pass@127.0.0.1:22")),
+			want:   "ssh://127.0.0.1:22|root|pass",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.target.Key(); got != tt.want {
+				t.Fatalf("key = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestScanTargetConstructorsNormalizeFields(t *testing.T) {
+	web := newWebTarget(" raw ", " http://example.com ", " Host.EXAMPLE ")
+	if web.Raw != "raw" || web.URL != "http://example.com" || web.HostHeader != "host.example" {
+		t.Fatalf("web target = %#v", web)
+	}
+
+	host := newHostCandidateTarget(" raw ", " Example.COM ")
+	if host.Raw != "raw" || host.Host != "example.com" {
+		t.Fatalf("host target = %#v", host)
+	}
+
+	poc := newPOCTarget(" raw ", " http://example.com ", []string{"Nginx", "nginx", "PHP"})
+	if poc.Raw != "raw" || poc.Target != "http://example.com" || !reflect.DeepEqual(poc.Fingers, []string{"nginx", "php"}) {
+		t.Fatalf("poc target = %#v", poc)
+	}
+}
+
+func TestScanDerivesTargetsFromResults(t *testing.T) {
+	profile := profile{AllowBroadPOC: true}
+	result := parsers.NewGOGOResult("127.0.0.1", "80")
+	result.Protocol = "http"
+
+	var events []event
+	deriveServiceResult(profile, serviceResult{Result: result}, func(event event) {
+		events = append(events, event)
+	})
+
+	if !hasTargetKind(events, targetWeb) {
+		t.Fatalf("derived events missing web target: %#v", events)
+	}
+	if !hasTargetKind(events, targetPOC) {
+		t.Fatalf("derived events missing poc target: %#v", events)
+	}
+}
+
+func TestScanPipelineDoesNotDispatchFindingOrError(t *testing.T) {
+	projector := newProjector([]string{"seed"}, projectorOptions{})
+	state := newPipelineState()
+	var runs int
+	capabilities := []capability{
+		{
+			Name:    "web",
+			Accepts: targetInputs(targetWeb),
+			Worker:  1,
+			Run: func(context.Context, target, emitFunc) {
+				runs++
+			},
+		},
+	}
+	pipeline := newPipeline(context.Background(), state, capabilities, projector, false)
+	pipeline.Run([]event{
+		findingEvent("test", fingerprintFinding{Target: "http://127.0.0.1", Fingers: []string{"nginx"}}),
+		errorEventOf("test", "boom"),
+	})
+
+	if runs != 0 {
+		t.Fatalf("capability runs = %d, want 0", runs)
+	}
+	if len(projector.fingerprints) != 1 {
+		t.Fatalf("fingerprints = %d, want 1", len(projector.fingerprints))
+	}
+	if len(projector.errors) != 1 {
+		t.Fatalf("errors = %d, want 1", len(projector.errors))
+	}
+}
+
+func TestFindingPriorityDefaults(t *testing.T) {
+	if got := (fingerprintFinding{Target: "http://127.0.0.1", Fingers: []string{"nginx"}}).Priority(); got != priorityLow {
+		t.Fatalf("fingerprint priority = %s, want %s", got, priorityLow)
+	}
+	if got := (weakpassFinding{Result: &parsers.ZombieResult{IP: "127.0.0.1", Port: "22", Service: "ssh"}}).Priority(); got != priorityHigh {
+		t.Fatalf("weakpass priority = %s, want %s", got, priorityHigh)
+	}
+	if got := (vulnFinding{Message: "[vuln] http://127.0.0.1 template=test severity=high"}).Priority(); got != priorityHigh {
+		t.Fatalf("vuln priority = %s, want %s", got, priorityHigh)
+	}
+}
+
+func TestScanPipelineDispatchesHighPriorityFindingToAgentVerifier(t *testing.T) {
+	projector := newProjector([]string{"seed"}, projectorOptions{})
+	state := newPipelineState()
+	var runs int
+	capabilities := []capability{
+		{
+			Name:   capAgentVerify,
+			Worker: 1,
+			AcceptEvents: func(event event) bool {
+				return event.Kind == eventFinding && event.Finding != nil && event.Finding.Priority().atLeast(priorityHigh)
+			},
+			RunEvent: func(_ context.Context, event event, emit emitFunc) {
+				runs++
+				emit(findingEvent(capAgentVerify, verificationFinding{
+					OriginalKey:      event.Finding.Key(),
+					OriginalKind:     event.Finding.Kind(),
+					OriginalPriority: event.Finding.Priority(),
+					Status:           verificationConfirmed,
+					Target:           findingTarget(event.Finding),
+					Summary:          "confirmed by test",
+				}))
+			},
+		},
+	}
+	pipeline := newPipeline(context.Background(), state, capabilities, projector, false)
+	pipeline.Run([]event{
+		findingEvent("test", fingerprintFinding{Target: "http://127.0.0.1", Fingers: []string{"nginx"}}),
+		findingEvent("test", vulnFinding{Message: "[vuln] http://127.0.0.1 template=test severity=high"}),
+	})
+
+	if runs != 1 {
+		t.Fatalf("verifier runs = %d, want 1", runs)
+	}
+	if len(projector.verifications) != 1 {
+		t.Fatalf("verifications = %d, want 1", len(projector.verifications))
+	}
+	if projector.verifications[0].Finding.Status != verificationConfirmed {
+		t.Fatalf("verification status = %s, want %s", projector.verifications[0].Finding.Status, verificationConfirmed)
+	}
+}
+
+func TestAgentVerifyCapabilityUsesProviderAndEmitsVerification(t *testing.T) {
+	llm := &scanScriptedProvider{
+		responses: []*provider.ChatCompletionResponse{
+			scanChatResponse(provider.NewTextMessage("assistant", "status: confirmed\nsummary: direct evidence supports the vulnerability\nevidence: template matched")),
+		},
+	}
+	cmd := New(&engines.Set{}, WithVerificationConfig(VerificationConfig{Provider: llm, Model: "test-model"}))
+	flags := flags{Verify: "high", VerifyTurns: 1, VerifyTimeout: 5}
+	cap, ok := cmd.agentVerifyCapability(flags)
+	if !ok {
+		t.Fatal("agent verifier capability was not built")
+	}
+	projector := newProjector([]string{"seed"}, projectorOptions{})
+	state := newPipelineState()
+	pipeline := newPipeline(context.Background(), state, []capability{cap}, projector, false)
+	pipeline.Run([]event{
+		findingEvent(capNeutronPOC, vulnFinding{Message: "[vuln] http://127.0.0.1 template=test severity=high"}),
+	})
+
+	if len(projector.verifications) != 1 {
+		t.Fatalf("verifications = %d, want 1", len(projector.verifications))
+	}
+	got := projector.verifications[0].Finding
+	if got.Status != verificationConfirmed {
+		t.Fatalf("status = %s, want %s", got.Status, verificationConfirmed)
+	}
+	if got.Target != "http://127.0.0.1" {
+		t.Fatalf("target = %q, want http://127.0.0.1", got.Target)
+	}
+	requests := llm.requestsSnapshot()
+	if len(requests) != 1 {
+		t.Fatalf("provider requests = %d, want 1", len(requests))
+	}
+	if len(requests[0].Tools) != 0 {
+		t.Fatalf("verifier tools = %#v, want none", requests[0].Tools)
+	}
+}
+
+func TestScanPipelineFanoutAndDedup(t *testing.T) {
+	projector := newProjector([]string{"seed"}, projectorOptions{})
+	state := newPipelineState()
+	var mu sync.Mutex
+	seen := make([]string, 0)
+
+	capabilities := []capability{
+		{
+			Name:    "service-to-web",
+			Accepts: targetInputs(targetService),
+			Worker:  1,
+			Run: func(_ context.Context, target target, emit emitFunc) {
+				mu.Lock()
+				seen = append(seen, "service-to-web")
+				mu.Unlock()
+				service, ok := target.(serviceTarget)
+				if !ok || service.Result == nil {
+					return
+				}
+				emit(targetEvent("test", "", newWebTarget("", service.Result.GetBaseURL(), "")))
+			},
+		},
+		{
+			Name:    "web-to-finger",
+			Accepts: targetInputs(targetWeb),
+			Worker:  1,
+			Run: func(_ context.Context, target target, emit emitFunc) {
+				mu.Lock()
+				seen = append(seen, "web-to-finger")
+				mu.Unlock()
+				web, ok := target.(webTarget)
+				if !ok {
+					return
+				}
+				emit(findingEvent("test", fingerprintFinding{Target: web.URL, Fingers: []string{"nginx"}}))
+			},
+		},
+	}
+
+	pipeline := newPipeline(context.Background(), state, capabilities, projector, false)
+	result := parsers.NewGOGOResult("127.0.0.1", "80")
+	result.Protocol = "http"
+	service := targetEvent("test", "", newServiceTarget("", result))
+	pipeline.Run([]event{service, service})
+
+	mu.Lock()
+	defer mu.Unlock()
+	if !reflect.DeepEqual(seen, []string{"service-to-web", "web-to-finger"}) {
+		t.Fatalf("seen capability runs = %#v", seen)
+	}
+	if len(projector.webEndpoints) != 1 {
+		t.Fatalf("web endpoints = %d, want 1", len(projector.webEndpoints))
+	}
+	if len(projector.fingerprints) != 1 {
+		t.Fatalf("fingerprints = %d, want 1", len(projector.fingerprints))
+	}
+	if len(projector.gogoResults) != 1 {
+		t.Fatalf("gogo results = %d, want 1", len(projector.gogoResults))
+	}
+	if len(projector.trace) != 0 {
+		t.Fatalf("trace entries = %d, want 0 without debug", len(projector.trace))
+	}
+}
+
+func mustZombieTarget(t *testing.T, raw string) sdkzombie.Target {
+	t.Helper()
+	target, ok := parseZombieTarget(raw, "")
+	if !ok {
+		t.Fatalf("parseZombieTarget(%q) failed", raw)
+	}
+	return target
+}
+
+func hasTargetKind(events []event, kind targetKind) bool {
+	for _, event := range events {
+		if event.Kind == eventTarget && event.Target != nil && event.Target.Kind() == kind {
+			return true
+		}
+	}
+	return false
+}
+
+func TestScanPipelineDebugTrace(t *testing.T) {
+	projector := newProjector([]string{"seed"}, projectorOptions{Debug: true})
+	state := newPipelineState()
+	capabilities := []capability{
+		{
+			Name:    "noop",
+			Accepts: targetInputs(targetWeb),
+			Worker:  1,
+			Run:     func(context.Context, target, emitFunc) {},
+		},
+	}
+	pipeline := newPipeline(context.Background(), state, capabilities, projector, true)
+	pipeline.Run([]event{targetEvent("test", "", newWebTarget("", "http://127.0.0.1", ""))})
+
+	if len(projector.trace) == 0 {
+		t.Fatal("expected debug trace entries")
+	}
+	if !strings.Contains(strings.Join(projector.trace, "\n"), "dispatch") {
+		t.Fatalf("trace missing dispatch entry: %#v", projector.trace)
+	}
+}
+
+func TestScanPipelineCancelReturns(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	started := make(chan struct{})
+	done := make(chan struct{})
+	var once sync.Once
+
+	projector := newProjector([]string{"seed"}, projectorOptions{})
+	state := newPipelineState()
+	capabilities := []capability{
+		{
+			Name:    "wait",
+			Accepts: targetInputs(targetWeb),
+			Worker:  1,
+			Run: func(ctx context.Context, _ target, _ emitFunc) {
+				once.Do(func() { close(started) })
+				<-ctx.Done()
+			},
+		},
+	}
+	pipeline := newPipeline(ctx, state, capabilities, projector, false)
+
+	go func() {
+		pipeline.Run([]event{targetEvent("test", "", newWebTarget("", "http://127.0.0.1", ""))})
+		close(done)
+	}()
+
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("capability did not start")
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("pipeline did not return after context cancellation")
+	}
+}
+
+func TestScanSummaryJSONLines(t *testing.T) {
+	projector := newProjector([]string{"seed"}, projectorOptions{})
+	projector.Observe(pipelineEvent{Action: pipelineEventAccept, Event: targetEvent("test", "", newServiceTarget("", parsers.NewGOGOResult("127.0.0.1", "80")))})
+	projector.Observe(pipelineEvent{Action: pipelineEventAccept, Event: targetEvent("spray_check", "", newWebProbeTarget("", "spray_check", "", &parsers.SprayResult{
+		UrlString: "http://127.0.0.1:80",
+		Status:    401,
+		Distance:  1,
+	}))})
+
+	out, err := projector.JSONLines()
+	if err != nil {
+		t.Fatalf("JSONLines() error = %v", err)
+	}
+	if hasANSI(out) {
+		t.Fatalf("json output contains ANSI: %q", out)
+	}
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("json lines = %d, want 2: %q", len(lines), out)
+	}
+	var gogoResult parsers.GOGOResult
+	if err := json.Unmarshal([]byte(lines[0]), &gogoResult); err != nil {
+		t.Fatalf("unmarshal gogo json: %v", err)
+	}
+	if gogoResult.Ip != "127.0.0.1" || gogoResult.Port != "80" {
+		t.Fatalf("gogo json = %#v", gogoResult)
+	}
+	var sprayResult parsers.SprayResult
+	if err := json.Unmarshal([]byte(lines[1]), &sprayResult); err != nil {
+		t.Fatalf("unmarshal spray json: %v", err)
+	}
+	if sprayResult.UrlString != "http://127.0.0.1:80" || sprayResult.Status != 401 {
+		t.Fatalf("spray json = %#v", sprayResult)
+	}
+}
+
+func TestScanSkipsFailedSprayProbeResults(t *testing.T) {
+	var buf bytes.Buffer
+	projector := newProjector([]string{"seed"}, projectorOptions{Stream: &buf})
+	failed := &parsers.SprayResult{
+		UrlString: "https://127.0.0.1:1080",
+		Source:    parsers.UpgradeSource,
+		Reason:    "request failed",
+		ErrString: `Get "https://127.0.0.1:1080": EOF`,
+	}
+
+	projector.Observe(pipelineEvent{
+		Action: pipelineEventAccept,
+		Event:  targetEvent("spray_check", "", newWebProbeTarget("", "spray_check", "", failed)),
+	})
+
+	if got := buf.String(); got != "" {
+		t.Fatalf("stream output = %q, want empty", got)
+	}
+	if len(projector.sprayResults) != 0 {
+		t.Fatalf("spray results = %d, want 0", len(projector.sprayResults))
+	}
+	var derived []event
+	deriveWebProbeResult(profile{AllowBroadPOC: true}, webProbeResult{
+		Source: "spray_check",
+		Result: failed,
+	}, func(event event) {
+		derived = append(derived, event)
+	})
+	if len(derived) != 0 {
+		t.Fatalf("derived events = %#v, want none", derived)
+	}
+}
+
+func TestScanStreamsAcceptedResults(t *testing.T) {
+	var buf bytes.Buffer
+	projector := newProjector([]string{"seed"}, projectorOptions{Stream: &buf, StreamColor: true})
+	result := parsers.NewGOGOResult("127.0.0.1", "80")
+	result.Protocol = "http"
+	result.Status = "200"
+
+	projector.Observe(pipelineEvent{Action: pipelineEventAccept, Event: targetEvent(capGogoPortscan, "", newServiceTarget("", result))})
+
+	raw := buf.String()
+	if !hasANSI(raw) {
+		t.Fatalf("colored stream output missing ANSI: %q", raw)
+	}
+	out := stripANSI(raw)
+	if !strings.Contains(out, "[gogo_portscan] http://127.0.0.1:80") {
+		t.Fatalf("stream output = %q", out)
+	}
+	if strings.Contains(out, "##") {
+		t.Fatalf("stream output should be single-line event output: %q", out)
+	}
+}
+
+func TestScanStreamsWithoutColor(t *testing.T) {
+	var buf bytes.Buffer
+	projector := newProjector([]string{"seed"}, projectorOptions{Stream: &buf})
+	result := parsers.NewGOGOResult("127.0.0.1", "80")
+	result.Protocol = "http"
+	result.Status = "200"
+
+	projector.Observe(pipelineEvent{Action: pipelineEventAccept, Event: targetEvent(capGogoPortscan, "", newServiceTarget("", result))})
+
+	out := buf.String()
+	if hasANSI(out) {
+		t.Fatalf("uncolored stream output contains ANSI: %q", out)
+	}
+	if !strings.Contains(out, "[gogo_portscan] http://127.0.0.1:80") {
+		t.Fatalf("stream output = %q", out)
+	}
+}
+
+func TestProjectorSlowStreamDoesNotHoldStateLock(t *testing.T) {
+	writer := &blockingWriter{
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	projector := newProjector([]string{"seed"}, projectorOptions{Stream: writer})
+	result := parsers.NewGOGOResult("127.0.0.1", "80")
+	result.Protocol = "http"
+	result.Status = "200"
+
+	observeDone := make(chan struct{})
+	go func() {
+		projector.Observe(pipelineEvent{Action: pipelineEventAccept, Event: targetEvent(capGogoPortscan, "", newServiceTarget("", result))})
+		close(observeDone)
+	}()
+
+	select {
+	case <-writer.started:
+	case <-time.After(time.Second):
+		t.Fatal("stream writer was not called")
+	}
+
+	jsonDone := make(chan struct{})
+	go func() {
+		if _, err := projector.JSONLines(); err != nil {
+			t.Errorf("JSONLines() error = %v", err)
+		}
+		close(jsonDone)
+	}()
+
+	select {
+	case <-jsonDone:
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("projector state lock was held while writing stream output")
+	}
+
+	close(writer.release)
+	select {
+	case <-observeDone:
+	case <-time.After(time.Second):
+		t.Fatal("Observe did not finish after stream writer was released")
+	}
+}
+
+func TestScanPlainTextStripsANSI(t *testing.T) {
+	projector := newProjector([]string{"seed"}, projectorOptions{})
+	projector.Observe(pipelineEvent{Action: pipelineEventAccept, Event: targetEvent("spray_check", "", newWebProbeTarget("", "spray_check", "", &parsers.SprayResult{
+		UrlString: "http://127.0.0.1:80",
+		Status:    200,
+		Distance:  1,
+	}))})
+	projector.Finish()
+
+	out := projector.PlainText()
+	if hasANSI(out) {
+		t.Fatalf("plain text output contains ANSI: %q", out)
+	}
+	if !strings.Contains(out, "sim:1") {
+		t.Fatalf("plain text output missing parser content: %q", out)
+	}
+}
+
+func TestScanOutputFileWritesPlainTextWithoutChangingStdout(t *testing.T) {
+	cmd := New(&engines.Set{Spray: spray.NewEngine(nil)})
+	file := filepath.Join(t.TempDir(), "scan.txt")
+	var stream bytes.Buffer
+
+	out, err := cmd.ExecuteStreaming(context.Background(), []string{"-i", "http://127.0.0.1:1", "--mode", "quick", "--timeout", "1", "-f", file}, &stream)
+	if err != nil {
+		t.Fatalf("ExecuteStreaming() error = %v", err)
+	}
+	data, err := os.ReadFile(file)
+	if err != nil {
+		t.Fatalf("read output file: %v", err)
+	}
+	fileOut := string(data)
+	if hasANSI(fileOut) {
+		t.Fatalf("file output contains ANSI: %q", fileOut)
+	}
+	if !strings.Contains(fileOut, "[scan] completed") {
+		t.Fatalf("file output missing summary: %q", fileOut)
+	}
+	if !strings.Contains(out, "[scan] completed") {
+		t.Fatalf("stdout output missing summary: %q", out)
+	}
+	if strings.Contains(out, "[scan] web ") {
+		t.Fatalf("stdout output should not repeat streamed events: %q", out)
+	}
+	if !strings.Contains(stripANSI(stream.String()), "web http://127.0.0.1:1") {
+		t.Fatalf("stream output missing event line: %q", stream.String())
+	}
+}
+
+func hasANSI(value string) bool {
+	return strings.Contains(value, "\x1b[")
+}
+
+type blockingWriter struct {
+	started chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (w *blockingWriter) Write(p []byte) (int, error) {
+	w.once.Do(func() { close(w.started) })
+	<-w.release
+	return len(p), nil
+}
+
+func TestScanReportMarkdown(t *testing.T) {
+	projector := newProjector([]string{"seed"}, projectorOptions{})
+	projector.Observe(pipelineEvent{Action: pipelineEventCapabilityStart, Capability: capGogoPortscan, Event: targetEvent("", "", newScanTarget("", "127.0.0.1", ""))})
+	projector.Observe(pipelineEvent{Action: pipelineEventAccept, Event: targetEvent(capGogoPortscan, "", newServiceTarget("", parsers.NewGOGOResult("127.0.0.1", "80")))})
+	projector.Observe(pipelineEvent{Action: pipelineEventAccept, Event: targetEvent("spray_check", "", newWebProbeTarget("", "spray_check", "", &parsers.SprayResult{
+		UrlString: "http://127.0.0.1:80",
+		Status:    200,
+		Distance:  1,
+	}))})
+	projector.Observe(pipelineEvent{Action: pipelineEventAccept, Event: findingEvent(capAgentVerify, verificationFinding{
+		OriginalKey:      "vuln|1",
+		OriginalKind:     findingVuln,
+		OriginalPriority: priorityHigh,
+		Status:           verificationConfirmed,
+		Target:           "http://127.0.0.1",
+		Summary:          "confirmed by test",
+	})})
+	projector.Finish()
+
+	report := projector.ReportMarkdown()
+	if hasANSI(report) {
+		t.Fatalf("report contains ANSI: %q", report)
+	}
+	for _, want := range []string{"# Scan Report", "## Metrics", "## Capability Runs", "## Open Services", "## AI Verification Results", "confirmed by test", "gogo_portscan"} {
+		if !strings.Contains(report, want) {
+			t.Fatalf("report missing %q:\n%s", want, report)
+		}
+	}
+}
+
+type scanScriptedProvider struct {
+	mu        sync.Mutex
+	responses []*provider.ChatCompletionResponse
+	requests  []*provider.ChatCompletionRequest
+}
+
+func (p *scanScriptedProvider) Name() string { return "scripted" }
+
+func (p *scanScriptedProvider) ChatCompletion(_ context.Context, req *provider.ChatCompletionRequest) (*provider.ChatCompletionResponse, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.requests = append(p.requests, scanCloneRequest(req))
+	if len(p.responses) == 0 {
+		return nil, fmt.Errorf("no scripted response left")
+	}
+	resp := p.responses[0]
+	p.responses = p.responses[1:]
+	return resp, nil
+}
+
+func (p *scanScriptedProvider) requestsSnapshot() []*provider.ChatCompletionRequest {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	out := make([]*provider.ChatCompletionRequest, 0, len(p.requests))
+	for _, req := range p.requests {
+		out = append(out, scanCloneRequest(req))
+	}
+	return out
+}
+
+func scanChatResponse(msg provider.ChatMessage) *provider.ChatCompletionResponse {
+	return &provider.ChatCompletionResponse{
+		Choices: []provider.Choice{{Message: msg}},
+	}
+}
+
+func scanCloneRequest(req *provider.ChatCompletionRequest) *provider.ChatCompletionRequest {
+	cloned := *req
+	cloned.Messages = append([]provider.ChatMessage(nil), req.Messages...)
+	cloned.Tools = append([]provider.ToolDefinition(nil), req.Tools...)
+	return &cloned
+}

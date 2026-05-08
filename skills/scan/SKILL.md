@@ -1,0 +1,31 @@
+---
+name: scan
+description: Use this skill when working with scan for the multi-stage aiscan pipeline across discovery, web probing, weak credentials, POC checks, and verification.
+internal: true
+---
+
+# Scan
+
+Scan is the multi-stage orchestration pipeline in aiscan.
+
+Capabilities:
+
+- combine discovery, web probing, weak credential checks, POC execution, and optional AI verification
+- produce discovered targets, services, web endpoints, fingerprints, weak credentials, POC matches, errors, and final stats
+- expose capability names such as gogo portscan, spray web probing, zombie weakpass, neutron POC, and agent verification
+- run quick or full profiles depending on depth needs
+
+Common usage:
+
+```bash
+scan -i <target> --mode quick
+scan -i <target> --mode full
+scan -i <target> --mode quick --verify=high
+scan -i <target> --ports top1000
+scan -i <target> -j
+```
+
+Notes:
+
+- `scan --verify=<level>` enables AI verification for matching priority findings when an LLM provider is configured.
+- User intent decides whether scan output should be summarized, analyzed, validated, reported, or used to choose follow-up commands.

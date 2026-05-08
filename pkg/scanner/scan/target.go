@@ -1,0 +1,185 @@
+package scan
+
+import (
+	"fmt"
+	"strings"
+
+	"github.com/chainreactors/parsers"
+	sdkzombie "github.com/chainreactors/sdk/zombie"
+	"github.com/chainreactors/utils"
+)
+
+type target interface {
+	Kind() targetKind
+	Key() string
+}
+
+type targetKind string
+
+const (
+	targetScan          targetKind = "scan-target"
+	targetService       targetKind = "service-result"
+	targetWeb           targetKind = "web-target"
+	targetWebProbe      targetKind = "web-probe-result"
+	targetHostCandidate targetKind = "host-candidate"
+	targetWeakpass      targetKind = "weakpass-target"
+	targetPOC           targetKind = "poc-target"
+)
+
+type scanTarget struct {
+	Target string
+	Ports  string
+	Raw    string
+}
+
+func newScanTarget(raw, target, ports string) scanTarget {
+	return scanTarget{
+		Target: strings.TrimSpace(target),
+		Ports:  strings.TrimSpace(ports),
+		Raw:    strings.TrimSpace(raw),
+	}
+}
+
+func (t scanTarget) Kind() targetKind { return targetScan }
+
+func (t scanTarget) Key() string {
+	return strings.ToLower(t.Target) + "|" + t.Ports
+}
+
+type serviceTarget struct {
+	Result *parsers.GOGOResult
+	Raw    string
+}
+
+func newServiceTarget(raw string, result *parsers.GOGOResult) serviceTarget {
+	return serviceTarget{
+		Result: result,
+		Raw:    strings.TrimSpace(raw),
+	}
+}
+
+func (t serviceTarget) Kind() targetKind { return targetService }
+
+func (t serviceTarget) Key() string {
+	if t.Result == nil {
+		return ""
+	}
+	return fmt.Sprintf("%s|%s|%s", strings.ToLower(t.Result.Ip), t.Result.Port, t.Result.Protocol)
+}
+
+type webTarget struct {
+	URL        string
+	HostHeader string
+	Raw        string
+}
+
+func newWebTarget(raw, rawURL, hostHeader string) webTarget {
+	return webTarget{
+		URL:        strings.TrimSpace(rawURL),
+		HostHeader: strings.ToLower(strings.TrimSpace(hostHeader)),
+		Raw:        strings.TrimSpace(raw),
+	}
+}
+
+func (t webTarget) Kind() targetKind { return targetWeb }
+
+func (t webTarget) Key() string {
+	return utils.NormalizeURL(t.URL) + "|host=" + strings.ToLower(t.HostHeader)
+}
+
+type webProbeTarget struct {
+	Result     *parsers.SprayResult
+	HostHeader string
+	Capability string
+	Raw        string
+}
+
+func newWebProbeTarget(raw, capability, hostHeader string, result *parsers.SprayResult) webProbeTarget {
+	return webProbeTarget{
+		Result:     result,
+		HostHeader: strings.ToLower(strings.TrimSpace(hostHeader)),
+		Capability: strings.TrimSpace(capability),
+		Raw:        strings.TrimSpace(raw),
+	}
+}
+
+func (t webProbeTarget) Kind() targetKind { return targetWebProbe }
+
+func (t webProbeTarget) Key() string {
+	if t.Result == nil {
+		return ""
+	}
+	return fmt.Sprintf("%s|%s|%s|%s|%d|%d",
+		t.Capability,
+		utils.NormalizeURL(t.Result.UrlString),
+		strings.ToLower(t.HostHeader),
+		t.Result.Path,
+		t.Result.Status,
+		t.Result.Source,
+	)
+}
+
+type hostCandidateTarget struct {
+	Host string
+	Raw  string
+}
+
+func newHostCandidateTarget(raw, host string) hostCandidateTarget {
+	return hostCandidateTarget{
+		Host: strings.ToLower(strings.TrimSpace(host)),
+		Raw:  strings.TrimSpace(raw),
+	}
+}
+
+func (t hostCandidateTarget) Kind() targetKind { return targetHostCandidate }
+
+func (t hostCandidateTarget) Key() string {
+	return strings.ToLower(strings.TrimSpace(t.Host))
+}
+
+type weakpassTarget struct {
+	Target sdkzombie.Target
+	Raw    string
+}
+
+func newWeakpassTarget(raw string, target sdkzombie.Target) weakpassTarget {
+	target.Service = strings.ToLower(strings.TrimSpace(target.Service))
+	target.Scheme = strings.ToLower(strings.TrimSpace(target.Scheme))
+	target.IP = strings.TrimSpace(target.IP)
+	target.Port = strings.TrimSpace(target.Port)
+	return weakpassTarget{
+		Target: target,
+		Raw:    strings.TrimSpace(raw),
+	}
+}
+
+func (t weakpassTarget) Kind() targetKind { return targetWeakpass }
+
+func (t weakpassTarget) Key() string {
+	target := t.Target
+	key := strings.ToLower(target.Service) + "://" + strings.ToLower(target.Address())
+	if target.Username != "" || target.Password != "" {
+		key += "|" + target.Username + "|" + target.Password
+	}
+	return key
+}
+
+type pocTarget struct {
+	Target  string
+	Fingers []string
+	Raw     string
+}
+
+func newPOCTarget(raw, target string, fingers []string) pocTarget {
+	return pocTarget{
+		Target:  strings.TrimSpace(target),
+		Fingers: parsers.NormalizeNames(fingers),
+		Raw:     strings.TrimSpace(raw),
+	}
+}
+
+func (t pocTarget) Kind() targetKind { return targetPOC }
+
+func (t pocTarget) Key() string {
+	return strings.ToLower(t.Target) + "|" + strings.Join(parsers.NormalizeNames(t.Fingers), ",")
+}

@@ -1,0 +1,276 @@
+package cmd
+
+import (
+	"reflect"
+	"strings"
+	"testing"
+
+	"github.com/chainreactors/aiscan/skills"
+)
+
+func TestParseCLIScanExtractsLLMAndPassesScannerArgs(t *testing.T) {
+	parsed, err := parseCLI([]string{
+		"--cyberhub-url", "http://hub:8080",
+		"scan",
+		"-i", "127.0.0.1",
+		"--verify=high",
+		"--llm-api-key", "KEY",
+		"--llm-model=deepseek-v4-pro",
+		"--llm-base-url", "https://api.deepseek.com",
+		"--cyberhub-key=HUBKEY",
+	})
+	if err != nil {
+		t.Fatalf("parseCLI() error = %v", err)
+	}
+	if parsed.Mode != runModeScanner {
+		t.Fatalf("mode = %s, want %s", parsed.Mode, runModeScanner)
+	}
+	wantArgs := []string{"scan", "-i", "127.0.0.1", "--verify=high"}
+	if !reflect.DeepEqual(parsed.ScannerArgs, wantArgs) {
+		t.Fatalf("scanner args = %#v, want %#v", parsed.ScannerArgs, wantArgs)
+	}
+	opt := parsed.Option
+	if opt.APIKey != "KEY" || opt.Model != "deepseek-v4-pro" || opt.BaseURL != "https://api.deepseek.com" {
+		t.Fatalf("llm options = %#v", opt.LLMOptions)
+	}
+	if opt.CyberhubURL != "http://hub:8080" || opt.CyberhubKey != "HUBKEY" {
+		t.Fatalf("scanner options = %#v", opt.ScannerOptions)
+	}
+}
+
+func TestParseCLICyberhubModeRootAndPassthrough(t *testing.T) {
+	parsed, err := parseCLI([]string{
+		"--cyberhub-mode", "override",
+		"spray",
+		"-u", "http://127.0.0.1:5000",
+	})
+	if err != nil {
+		t.Fatalf("parseCLI() error = %v", err)
+	}
+	if parsed.Option.CyberhubMode != "override" {
+		t.Fatalf("cyberhub mode = %q, want override", parsed.Option.CyberhubMode)
+	}
+	if !reflect.DeepEqual(parsed.ScannerArgs, []string{"spray", "-u", "http://127.0.0.1:5000"}) {
+		t.Fatalf("scanner args = %#v", parsed.ScannerArgs)
+	}
+}
+
+func TestParseCLIScannerRootArgsAfterPassthroughCommand(t *testing.T) {
+	parsed, err := parseCLI([]string{
+		"gogo",
+		"-i", "127.0.0.1",
+		"--cyberhub-url", "http://hub:8080",
+		"--cyberhub-key", "HUBKEY",
+	})
+	if err != nil {
+		t.Fatalf("parseCLI() error = %v", err)
+	}
+	wantArgs := []string{"gogo", "-i", "127.0.0.1"}
+	if !reflect.DeepEqual(parsed.ScannerArgs, wantArgs) {
+		t.Fatalf("scanner args = %#v, want %#v", parsed.ScannerArgs, wantArgs)
+	}
+	if parsed.Option.CyberhubURL != "http://hub:8080" || parsed.Option.CyberhubKey != "HUBKEY" {
+		t.Fatalf("scanner options = %#v", parsed.Option.ScannerOptions)
+	}
+}
+
+func TestParseCLIPassthroughScannerExtractsAIIntentArgs(t *testing.T) {
+	parsed, err := parseCLI([]string{
+		"--llm-api-key", "KEY",
+		"--prompt", "review focus fingerprints",
+		"--skill", "scan",
+		"gogo",
+		"-i", "127.0.0.1",
+		"--ai",
+		"--llm-model", "deepseek-v4-pro",
+		"--skill=aiscan",
+	})
+	if err != nil {
+		t.Fatalf("parseCLI() error = %v", err)
+	}
+	if parsed.Mode != runModeScanner {
+		t.Fatalf("mode = %s, want %s", parsed.Mode, runModeScanner)
+	}
+	wantArgs := []string{"gogo", "-i", "127.0.0.1"}
+	if !reflect.DeepEqual(parsed.ScannerArgs, wantArgs) {
+		t.Fatalf("scanner args = %#v, want %#v", parsed.ScannerArgs, wantArgs)
+	}
+	opt := parsed.Option
+	if !opt.AI || opt.APIKey != "KEY" || opt.Model != "deepseek-v4-pro" || opt.Prompt != "review focus fingerprints" {
+		t.Fatalf("option = %#v", opt)
+	}
+	if !reflect.DeepEqual(opt.Skills, []string{"scan", "aiscan"}) {
+		t.Fatalf("skills = %#v", opt.Skills)
+	}
+}
+
+func TestScannerAIIntentInjectsCommandSkill(t *testing.T) {
+	store, diagnostics := skills.LoadEmbeddedStore()
+	if len(diagnostics) != 0 {
+		t.Fatalf("diagnostics = %#v", diagnostics)
+	}
+	intent, err := resolveScannerAIIntent(&Option{AgentOptions: AgentOptions{Prompt: "focus on risky exposed services"}}, store, "gogo")
+	if err != nil {
+		t.Fatalf("resolveScannerAIIntent() error = %v", err)
+	}
+	for _, want := range []string{
+		`<skill name="gogo" location="aiscan://skills/gogo/SKILL.md">`,
+		"# Gogo",
+		"focus on risky exposed services",
+	} {
+		if !strings.Contains(intent, want) {
+			t.Fatalf("intent missing %q:\n%s", want, intent)
+		}
+	}
+}
+
+func TestParseCLILoopCommand(t *testing.T) {
+	parsed, err := parseCLI([]string{
+		"--debug",
+		"--cyberhub-mode", "override",
+		"loop",
+		"-p", "scan localhost",
+		"-s", "aiscan",
+		"--space", "case-1",
+		"--llm-model", "gpt-4o",
+	})
+	if err != nil {
+		t.Fatalf("parseCLI() error = %v", err)
+	}
+	if parsed.Mode != runModeLoop {
+		t.Fatalf("mode = %s, want %s", parsed.Mode, runModeLoop)
+	}
+	opt := parsed.Option
+	if !opt.Debug || opt.Prompt != "scan localhost" || opt.Space != "case-1" || opt.Model != "gpt-4o" || opt.CyberhubMode != "override" {
+		t.Fatalf("option = %#v", opt)
+	}
+	if !reflect.DeepEqual(opt.Skills, []string{"aiscan"}) {
+		t.Fatalf("skills = %#v", opt.Skills)
+	}
+}
+
+func TestParseCLIACPServeCommandUsesURL(t *testing.T) {
+	parsed, err := parseCLI([]string{
+		"acp",
+		"serve",
+		"--acp-url", "http://127.0.0.1:9999",
+		"--acp-db", "./test.db",
+		"--timeout", "10",
+	})
+	if err != nil {
+		t.Fatalf("parseCLI() error = %v", err)
+	}
+	if parsed.Mode != runModeACPServe {
+		t.Fatalf("mode = %s, want %s", parsed.Mode, runModeACPServe)
+	}
+	opt := parsed.Option
+	if opt.ACPURL != "http://127.0.0.1:9999" || opt.ACPDB != "./test.db" || opt.Timeout != 10 {
+		t.Fatalf("option = %#v", opt)
+	}
+}
+
+func TestDirectScannerRuntimeFeaturesForVerifyModes(t *testing.T) {
+	withDefaults(t, func() {
+		DefaultVerify = "auto"
+		features, args, err := directScannerRuntimeFeatures([]string{"scan", "-i", "127.0.0.1"})
+		if err != nil {
+			t.Fatalf("directScannerRuntimeFeatures() error = %v", err)
+		}
+		if !features.ProviderEnabled || !features.ProviderOptional || !features.VerificationEnabled || features.VerifyMinPriority != "high" {
+			t.Fatalf("features = %#v", features)
+		}
+		if !reflect.DeepEqual(args, []string{"scan", "-i", "127.0.0.1"}) {
+			t.Fatalf("args = %#v", args)
+		}
+
+		features, args, err = directScannerRuntimeFeatures([]string{"scan", "-i", "127.0.0.1", "--verify=off"})
+		if err != nil {
+			t.Fatalf("directScannerRuntimeFeatures() error = %v", err)
+		}
+		if features.ProviderEnabled || features.VerificationEnabled {
+			t.Fatalf("features = %#v", features)
+		}
+		if !reflect.DeepEqual(args, []string{"scan", "-i", "127.0.0.1", "--verify=off"}) {
+			t.Fatalf("args = %#v", args)
+		}
+
+		features, _, err = directScannerRuntimeFeatures([]string{"scan", "-i", "127.0.0.1", "--verify", "critical"})
+		if err != nil {
+			t.Fatalf("directScannerRuntimeFeatures() error = %v", err)
+		}
+		if !features.ProviderEnabled || features.ProviderOptional || !features.VerificationEnabled || features.VerifyMinPriority != "critical" {
+			t.Fatalf("features = %#v", features)
+		}
+	})
+}
+
+func TestAppConfigUsesCompiledDefaults(t *testing.T) {
+	withDefaults(t, func() {
+		DefaultCyberhubURL = "http://hub:8080"
+		DefaultCyberhubKey = "HUBKEY"
+		DefaultCyberhubMode = "override"
+		DefaultVerifyTurns = "7"
+		DefaultVerifyTimeout = "77"
+		DefaultACPURL = "http://acp:8765"
+		DefaultACPNodeID = "node-1"
+		DefaultACPNodeName = "worker-1"
+		DefaultSpace = "case-1"
+
+		opt := &Option{}
+		cfg := appConfig(opt, runtimeFeatures{
+			ProviderEnabled:     true,
+			ProviderOptional:    true,
+			VerificationEnabled: true,
+			VerifyMinPriority:   "critical",
+		})
+		if cfg.Scanner.CyberhubURL != DefaultCyberhubURL || cfg.Scanner.CyberhubKey != DefaultCyberhubKey || cfg.Scanner.CyberhubMode != DefaultCyberhubMode {
+			t.Fatalf("scanner cyberhub config = %#v", cfg.Scanner)
+		}
+		if !cfg.Scanner.VerificationEnabled || cfg.Scanner.VerifyMinPriority != "critical" || cfg.Scanner.VerifyMaxTurns != 7 || cfg.Scanner.VerifyTimeout != 77 {
+			t.Fatalf("scanner verification config = %#v", cfg.Scanner)
+		}
+		if !cfg.Provider.Enabled || !cfg.Provider.Optional {
+			t.Fatalf("provider config = %#v", cfg.Provider)
+		}
+		if resolvedACPURL(opt) != DefaultACPURL || resolvedACPNodeID(opt) != DefaultACPNodeID || resolvedACPNodeName(opt) != DefaultACPNodeName || resolvedSpace(opt) != DefaultSpace {
+			t.Fatal("compiled ACP defaults were not resolved")
+		}
+	})
+}
+
+func withDefaults(t *testing.T, fn func()) {
+	t.Helper()
+	savedProvider := DefaultProvider
+	savedBaseURL := DefaultBaseURL
+	savedAPIKey := DefaultAPIKey
+	savedModel := DefaultModel
+	savedProxy := DefaultProxy
+	savedCyberhubURL := DefaultCyberhubURL
+	savedCyberhubKey := DefaultCyberhubKey
+	savedCyberhubMode := DefaultCyberhubMode
+	savedVerify := DefaultVerify
+	savedVerifyTurns := DefaultVerifyTurns
+	savedVerifyTimeout := DefaultVerifyTimeout
+	savedACPURL := DefaultACPURL
+	savedACPNodeID := DefaultACPNodeID
+	savedACPNodeName := DefaultACPNodeName
+	savedSpace := DefaultSpace
+	t.Cleanup(func() {
+		DefaultProvider = savedProvider
+		DefaultBaseURL = savedBaseURL
+		DefaultAPIKey = savedAPIKey
+		DefaultModel = savedModel
+		DefaultProxy = savedProxy
+		DefaultCyberhubURL = savedCyberhubURL
+		DefaultCyberhubKey = savedCyberhubKey
+		DefaultCyberhubMode = savedCyberhubMode
+		DefaultVerify = savedVerify
+		DefaultVerifyTurns = savedVerifyTurns
+		DefaultVerifyTimeout = savedVerifyTimeout
+		DefaultACPURL = savedACPURL
+		DefaultACPNodeID = savedACPNodeID
+		DefaultACPNodeName = savedACPNodeName
+		DefaultSpace = savedSpace
+	})
+	fn()
+}
