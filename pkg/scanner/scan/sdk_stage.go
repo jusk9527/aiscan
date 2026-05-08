@@ -112,21 +112,16 @@ func sprayCheckStream(ctx context.Context, engine *spray.SprayEngine, opts spray
 	if engine == nil {
 		return nil, fmt.Errorf("spray engine is not available")
 	}
-	defaultOpt := spray.NewDefaultOption()
-	// Scan capabilities pass exact URLs; keep spray from expanding them to its
-	// default 80/443 port range.
-	defaultOpt.PortRange = ""
-	defaultOpt.Dictionaries = append([]string(nil), opts.Dictionaries...)
-	defaultOpt.Rules = append([]string(nil), opts.Rules...)
-	defaultOpt.Word = opts.Word
-	defaultOpt.DefaultDict = opts.DefaultDict
-	defaultOpt.Advance = opts.Advance
 	sprayCtx := spray.NewContext().
 		WithContext(ctx).
-		SetOption(defaultOpt.Option).
 		SetThreads(opts.Threads).
 		SetTimeout(opts.Timeout).
 		SetHost(opts.Host).
+		SetDictionaries(opts.Dictionaries).
+		SetRules(opts.Rules).
+		SetWord(opts.Word).
+		SetDefaultDict(opts.DefaultDict).
+		SetAdvance(opts.Advance).
 		SetCrawlPlugin(opts.Crawl).
 		SetFinger(opts.Finger).
 		SetActivePlugin(opts.ActivePlugin).
