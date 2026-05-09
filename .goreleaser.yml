@@ -67,3 +67,8 @@ release:
     owner: chainreactors
     name: aiscan
   draft: true
+  prerelease: auto
+  replace_existing_draft: true
+  replace_existing_artifacts: true
+  mode: replace
+  name_template: "{{ .Tag }}"

@@ -25,6 +25,7 @@ jobs:
           DATE=$(date -u +%Y%m%d)
           echo "DATE=$DATE" >> $GITHUB_ENV
           echo "TAG=v0.0.0-nightly.$DATE" >> $GITHUB_ENV
+          echo "GORELEASER_CURRENT_TAG=v0.0.0-nightly.$DATE" >> $GITHUB_ENV
           echo "RELEASE_NAME=Nightly $DATE" >> $GITHUB_ENV
 
       - name: Create or update nightly tag
@@ -48,7 +49,7 @@ jobs:
         uses: goreleaser/goreleaser-action@v6
         with:
           distribution: goreleaser
-          version: latest
+          version: '~> v2'
           args: release --clean --skip=validate
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
