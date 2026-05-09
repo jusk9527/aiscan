@@ -9,7 +9,7 @@ before:
 builds:
   - id: aiscan
     main: ./cmd/aiscan
-    binary: aiscan
+    binary: "{{ .ProjectName }}"
     env:
       - CGO_ENABLED=0
     goos:
@@ -28,29 +28,42 @@ builds:
       - forceposix
       - emptytemplates
       - noembed
+      - osusergo
+      - netgo
     ldflags:
       - -s -w
+    asmflags:
+      - all=-trimpath={{.Env.GOPATH}}
+    gcflags:
+      - all=-trimpath={{.Env.GOPATH}}
+
+upx:
+  - enabled: true
+    goos: [linux, windows]
+    goarch:
+      - amd64
 
 archives:
-  - id: aiscan
-    ids:
-      - aiscan
-    name_template: >-
-      {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+  - name_template: "{{ .ProjectName }}_{{ .Os }}_{{ .Arch }}"
     formats:
-      - tar.gz
-    format_overrides:
-      - goos: windows
-        formats:
-          - zip
+      - binary
 
 checksum:
-  name_template: checksums.txt
+  name_template: "{{ .ProjectName }}_checksums.txt"
 
 snapshot:
   version_template: "{{ incpatch .Version }}-next"
+
+changelog:
+  sort: desc
+  filters:
+    exclude:
+      - '^MERGE'
+      - "{{ .Tag }}"
+      - "^docs"
 
 release:
   github:
     owner: chainreactors
     name: aiscan
+  draft: true
