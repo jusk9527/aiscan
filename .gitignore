@@ -19,3 +19,4 @@ bin/
 *.db
 *.db-*
 spray
+/pkg/scanner/resources/template.go
